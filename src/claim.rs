@@ -1,30 +1,30 @@
-//! What a claim carries.
+//! Claim payload schema.
 //!
-//! A claim is the body of one p2panda operation. The header is p2panda's: it holds the author's
-//! key, the signature and the time. The body is ours: a kind, the claims it refers to, and the
-//! fields of that kind.
+//! Each claim is stored as the body of a p2panda operation. The p2panda header stores the author's
+//! public key, signature, and timestamp; the body holds the claim kind, referenced claim IDs, and
+//! kind-specific fields.
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// The body of every claim, whatever its kind.
+/// Envelope for all claim kinds.
 ///
-/// `data` stays untyped here so that a client still stores and forwards kinds it does not know.
-/// Code reads it through [`Claim::read`], which gives the typed fields of one kind.
+/// `data` remains untyped JSON so peers can store and forward unknown claim kinds.
+/// Callers decode typed payloads via [`Claim::read`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Claim {
     pub kind: String,
-    /// The agent that wrote this for its owner, for example "Claude Code".
+    /// Optional agent name recorded by the client (for example, `"Claude Code"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
-    /// Ids of the claims this one refers to.
+    /// Claim IDs referenced by this claim.
     #[serde(default)]
     pub refs: Vec<String>,
     pub data: Value,
 }
 
-/// The typed fields of one kind of claim.
+/// Typed payload for a specific claim kind.
 pub trait Kind: Serialize + DeserializeOwned {
     const NAME: &'static str;
 }
@@ -35,11 +35,11 @@ impl Claim {
             kind: K::NAME.to_string(),
             agent,
             refs,
-            data: serde_json::to_value(body).expect("claim fields serialise to JSON"),
+            data: serde_json::to_value(body).expect("claim fields serialize to JSON"),
         }
     }
 
-    /// The fields of kind `K`, or `None` when this claim is of another kind or malformed.
+    /// Decodes `data` as kind `K`, returning `None` if the kind does not match or parsing fails.
     pub fn read<K: Kind>(&self) -> Option<K> {
         if self.kind != K::NAME {
             return None;
@@ -48,25 +48,24 @@ impl Claim {
     }
 }
 
-/// One version of a research artifact. `refs` names the version it follows; the first has none.
+/// A published version of a research artifact. `refs` lists parent version IDs (empty for the initial version).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Publish {
     pub title: String,
     #[serde(default)]
     pub authors: Vec<String>,
-    /// Where it came from, for example the paper's URL.
+    /// Source URL for the work (for example, an arXiv or delphi.science record URL).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
-    /// What changed in this version.
+    /// Summary of changes in this version.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
-    /// BLAKE3 of the file snapshot: an iroh-blobs collection, which lists every path and its hash.
+    /// BLAKE3 hash of the iroh-blobs collection representing the directory snapshot.
     pub snapshot: String,
     pub files: u64,
     pub bytes: u64,
-    /// For a Lean project that is judged against a challenge: the path, inside the snapshot, of
-    /// the configuration `lake comparator` reads. Without one the whole project goes through
-    /// `lake check`. Many records can share one snapshot and differ in this path.
+    /// Relative path inside the snapshot to a `lake comparator` config file.
+    /// If omitted, `delphi-p2p check` runs `lake check` (or `lake comparator` if `comparator.json` exists).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comparator: Option<String>,
 }
@@ -75,7 +74,7 @@ impl Kind for Publish {
     const NAME: &'static str = "publish";
 }
 
-/// "I hold the files of this snapshot." `refs` names the publish claim.
+/// Announces that the signing peer holds and serves a snapshot. `refs` contains the `publish` claim ID.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Have {
     pub snapshot: String,
@@ -85,12 +84,11 @@ impl Kind for Have {
     const NAME: &'static str = "have";
 }
 
-/// Where the author's file endpoint can be reached. The newest one by an author counts.
+/// Advertises a peer's iroh-blobs endpoint address and serving status. The latest claim per author applies.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Endpoint {
     pub blobs: iroh::EndpointAddr,
-    /// Whether the client stays up. Other clients start their search for peers from the ones
-    /// that do, so the network needs no fixed machine to find itself.
+    /// True when the peer is running `delphi-p2p serve` and can be used as a bootstrap node.
     #[serde(default)]
     pub serving: bool,
 }
@@ -104,7 +102,7 @@ impl Kind for Endpoint {
 pub enum Verdict {
     /// The checker accepted the snapshot.
     Pass,
-    /// The checker ran and rejected it.
+    /// The checker ran and rejected the snapshot.
     Fail,
 }
 
@@ -117,20 +115,20 @@ impl Verdict {
     }
 }
 
-/// The result of re-running a checker on one snapshot. `refs` names the publish claim.
+/// Signed result of running a checker on a snapshot. `refs` contains the `publish` claim ID.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Check {
-    /// The snapshot that was checked. A check says nothing about any other version.
+    /// Exact snapshot hash that was checked; does not apply to other versions.
     pub snapshot: String,
-    /// The command that judged it: "lake check" or "lake comparator".
+    /// Checker command that was executed (for example, `"lake check"` or `"lake comparator"`).
     pub checker: String,
-    /// The Lean toolchain named by the project, for example "leanprover/lean4:v4.36.0".
+    /// Lean toolchain string from `lean-toolchain` (for example, `"leanprover/lean4:v4.36.0"`).
     pub toolchain: String,
-    /// How the untrusted project was confined: "bwrap", "docker+bwrap" or "none".
+    /// Sandbox runner used: `"bwrap"`, `"docker+bwrap"`, or `"none"`.
     pub runner: String,
     pub result: Verdict,
     pub exit_code: i32,
-    /// The end of the checker's output, kept short.
+    /// Truncated tail of checker output.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 }
@@ -144,7 +142,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_claim_reads_back_as_its_own_kind_only() {
+    fn claim_reads_only_matching_kind() {
         let have = Have {
             snapshot: "ab".repeat(32),
         };
@@ -155,7 +153,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_kind_still_decodes() {
+    fn unknown_claim_kind_decodes() {
         let claim: Claim = serde_json::from_str(r#"{"kind":"vote","refs":["00"],"data":{"value":1}}"#).unwrap();
         assert_eq!(claim.kind, "vote");
         assert_eq!(claim.read::<Have>(), None);

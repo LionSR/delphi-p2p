@@ -1,7 +1,7 @@
-//! A running client: p2panda for claims, iroh-blobs for files, side by side.
+//! Live peer-to-peer node combining p2panda claim sync and iroh-blobs file transfer.
 //!
-//! The two libraries each keep their own connection. p2panda does not let another protocol share
-//! its endpoint, so files travel over a second iroh endpoint with its own key.
+//! Because p2panda does not expose its underlying endpoint for external protocols, file transfers
+//! run over a separate iroh endpoint with its own keypair.
 
 use std::time::Duration;
 
@@ -26,32 +26,31 @@ use crate::files;
 use crate::home::{Config, Home};
 use crate::index::{Index, Stored};
 
-/// Clients that use another name here never meet.
+/// Network namespace identifier; only peers sharing this identifier sync with each other.
 const NETWORK: &str = "delphi.science/1";
-/// The one topic of the first version: every public record.
+/// Single gossip topic used in v1 for all public records.
 const TOPIC: &str = "delphi.science/1/records";
 
-/// A claim goes out in one gossip message, and p2panda's default limit for one is 4096 bytes.
-/// Staying under it keeps this client compatible with every other p2panda default.
+/// Maximum serialized claim size in bytes, kept below p2panda's 4,096-byte default gossip limit.
 const MAX_CLAIM_BYTES: usize = 3000;
 
-/// How many always-on clients, learned from their claims, a client starts its search from.
+/// Maximum number of learned serving peers added as bootstrap candidates on startup.
 const MAX_LEARNED_BOOTSTRAPS: i64 = 32;
 
-/// A transfer that brings nothing for this long is given up.
+/// Idle timeout after which a stalled blob download is aborted.
 const STALLED: Duration = Duration::from_secs(60);
 
 pub struct Node {
     pub home: Home,
     pub config: Config,
-    /// This client's public key, in hex: the author of its claims.
+    /// Hex-encoded public key of this peer (used as the author of signed claims).
     pub me: String,
     pub index: Index,
     pub store: FsStore,
-    /// Whether this client stays up (`delphi-p2p serve`). Only then is it worth telling others that
-    /// it holds the files it fetched: a client that stops after one command cannot serve them.
+    /// True when running under `delphi-p2p serve`. Only serving peers announce `have` claims
+    /// for snapshots they download, since short-lived commands exit immediately.
     pub serving: bool,
-    // Dropping the p2panda node stops its networking, so it lives as long as this does.
+    // Keep the p2panda node alive for the lifetime of `Node` so networking stays active.
     _claims: p2panda::Node,
     publisher: StreamPublisher<Claim>,
     files: Router,
@@ -70,7 +69,7 @@ impl Node {
             .iter()
             .map(|url| {
                 url.parse()
-                    .with_context(|| format!("config.json: not a relay URL: {url}"))
+                    .with_context(|| format!("config.json: invalid relay URL: {url}"))
             })
             .collect::<Result<_>>()?;
 
@@ -91,18 +90,18 @@ impl Node {
             let node = peer
                 .node
                 .parse()
-                .with_context(|| format!("config.json: not a key: {}", peer.node))?;
+                .with_context(|| format!("config.json: invalid public key: {}", peer.node))?;
             let relay = peer
                 .relay
                 .parse()
-                .with_context(|| format!("config.json: not a relay URL: {}", peer.relay))?;
+                .with_context(|| format!("config.json: invalid relay URL: {}", peer.relay))?;
             builder = builder.bootstrap(node, relay);
         }
-        let claims = builder.spawn().await.context("could not start the claims node")?;
+        let claims = builder.spawn().await.context("failed to start p2panda node")?;
         let me = claims.id().to_hex();
 
-        // Besides the clients named in the settings, start from the ones that said they stay up.
-        // Every client that has synced once knows some, so no single machine has to be there.
+        // Add previously discovered serving peers as extra bootstraps so discovery continues if
+        // the configured seed goes offline.
         for stored in index.latest_of_each::<claim::Endpoint>(MAX_LEARNED_BOOTSTRAPS).await? {
             let Some(endpoint) = stored.claim.read::<claim::Endpoint>() else {
                 continue;
@@ -119,7 +118,7 @@ impl Node {
         let (publisher, subscription) = claims
             .stream::<Claim>(topic)
             .await
-            .context("could not open the records topic")?;
+            .context("failed to open records topic")?;
         let (ended, sessions) = watch::channel(0);
         tokio::spawn(consume(subscription, index.clone(), ended));
 
@@ -135,7 +134,7 @@ impl Node {
             .address_lookup(lookup.clone())
             .bind()
             .await
-            .context("could not open the file endpoint")?;
+            .context("failed to bind iroh file endpoint")?;
         let store = FsStore::load(home.blobs())
             .await
             .map_err(|err| anyhow::anyhow!("file store: {err}"))?;
@@ -160,25 +159,24 @@ impl Node {
         Ok(node)
     }
 
-    /// Signs a claim, stores it and hands it to the network. Returns its id.
+    /// Signs, stores, and broadcasts a claim, returning its hex operation ID.
     pub async fn publish<K: Kind>(&self, body: &K, refs: Vec<String>, agent: Option<String>) -> Result<String> {
         let claim = Claim::new(body, refs, agent.or_else(|| self.config.agent.clone()));
         let size = serde_json::to_vec(&claim)?.len();
         if size > MAX_CLAIM_BYTES {
-            bail!("the claim is {size} bytes; the limit is {MAX_CLAIM_BYTES}");
+            bail!("claim is {size} bytes, exceeding the {MAX_CLAIM_BYTES}-byte limit");
         }
         let pending = self.publisher.publish(claim).await?;
         let id = pending.hash().to_hex();
-        pending.await.context("the claim was not processed")?;
-        // Our own claims come back through the same stream as everyone else's. Wait for that, so
-        // the caller finds the claim in the index.
+        pending.await.context("claim was not processed by p2panda")?;
+        // Wait for our own published claim to loop through the subscription into the local index.
         self.wait_for(&id, Duration::from_secs(10))
             .await?
-            .context("the claim did not reach the index")?;
+            .context("published claim did not appear in the local index")?;
         Ok(id)
     }
 
-    /// The claim with this id, waiting up to `patience` for it to arrive from another client.
+    /// Returns the claim matching `id`, waiting up to `patience` for it to sync from peers.
     pub async fn wait_for(&self, id: &str, patience: Duration) -> Result<Option<Stored>> {
         let deadline = Instant::now() + patience;
         let mut arrivals = self.index.arrivals();
@@ -192,8 +190,8 @@ impl Node {
         }
     }
 
-    /// Gives other clients time to hand over what this one lacks: until a sync has finished and
-    /// nothing has arrived for a moment, or until `patience` runs out.
+    /// Waits for at least one sync session to finish and incoming claim traffic to go quiet,
+    /// bounded by `patience`.
     pub async fn settle(&self, patience: Duration) {
         let deadline = Instant::now() + patience;
         let mut sessions = self.sessions.clone();
@@ -208,13 +206,12 @@ impl Node {
         }
     }
 
-    /// Whether any other client has synced with this one since it started.
+    /// Returns true if at least one sync session with a peer has completed since startup.
     pub fn met_someone(&self) -> bool {
         *self.sessions.borrow() > 0
     }
 
-    /// Makes sure every file of the snapshot is in the local store, fetching what is missing from
-    /// clients that say they hold it.
+    /// Downloads any missing files of `snapshot` from peers holding it until complete locally.
     pub async fn fetch(&self, snapshot: Hash, patience: Duration) -> Result<()> {
         let deadline = Instant::now() + patience;
         while !files::complete(&self.store, snapshot).await? {
@@ -223,7 +220,7 @@ impl Node {
         Ok(())
     }
 
-    /// The files of the snapshot: their names, sizes and hashes. Fetches the list, not the files.
+    /// Returns the file manifest of `snapshot`, fetching only metadata and file sizes if needed.
     pub async fn list(&self, snapshot: Hash, patience: Duration) -> Result<Vec<files::Entry>> {
         let deadline = Instant::now() + patience;
         loop {
@@ -234,10 +231,8 @@ impl Node {
         }
     }
 
-    /// One round of asking the clients that say they hold the snapshot for `request`. The caller
-    /// looks in the store again afterwards. Fails once `deadline` has passed. The deadline is for
-    /// a holder to be found and reached: a transfer that has started runs to its end, and after
-    /// the deadline no client is asked.
+    /// Attempts one download round from known snapshot holders. `deadline` caps how long we search
+    /// for a peer; once a transfer begins it runs until completion or stall timeout.
     async fn ask(&self, snapshot: Hash, request: GetRequest, deadline: Instant) -> Result<()> {
         let mut problem = None;
         let holders = self.holders(snapshot).await?;
@@ -254,19 +249,18 @@ impl Node {
         }
         if Instant::now() >= deadline {
             match problem {
-                Some(err) => bail!("could not fetch snapshot {snapshot}: {err}"),
+                Some(err) => bail!("failed to fetch snapshot {snapshot}: {err}"),
                 None if known > 0 => bail!("snapshot {snapshot} is not in the local store"),
-                None => bail!("no client that holds snapshot {snapshot} is known yet"),
+                None => bail!("no known peer holds snapshot {snapshot} yet"),
             }
         }
-        // A holder's claims may still be on their way, or it may be starting up.
+        // Retry briefly in case holder claims are still syncing or a peer is coming online.
         sleep(Duration::from_millis(500)).await;
         Ok(())
     }
 
-    /// How many other clients say they hold the snapshot, waiting up to `patience` for the first.
-    /// The author of a version runs one command and stops, so its files outlive that command only
-    /// once another client has them.
+    /// Counts distinct other peers that have announced a `have` claim for `snapshot`, waiting up
+    /// to `patience` for at least one peer to confirm before returning.
     pub async fn other_holders(&self, snapshot: &str, patience: Duration) -> Result<usize> {
         let deadline = Instant::now() + patience;
         let mut arrivals = self.index.arrivals();
@@ -279,7 +273,7 @@ impl Node {
         }
     }
 
-    /// Says "I hold this snapshot and serve it", once.
+    /// Publishes a `have` claim for `snapshot` if this peer has not already announced one.
     pub async fn announce_holding(&self, version: &str, snapshot: &str, agent: Option<String>) -> Result<()> {
         if !self.index.holders(snapshot).await?.contains(&self.me) {
             let have = claim::Have {
@@ -290,8 +284,7 @@ impl Node {
         Ok(())
     }
 
-    /// Announces every snapshot that is complete in the store. A client that fetched files while
-    /// it ran one command at a time says so here, once it stays up.
+    /// Announces `have` claims for all complete snapshots in the local store when starting `serve`.
     pub async fn announce_all_held(&self) -> Result<()> {
         for stored in self.index.publishes().await? {
             let Some(publish) = stored.claim.read::<claim::Publish>() else {
@@ -314,7 +307,7 @@ impl Node {
         let _ = self.store.shutdown().await;
     }
 
-    /// File endpoints of the other clients that say they hold the snapshot.
+    /// Returns endpoint IDs of other peers holding `snapshot` and registers their addresses.
     async fn holders(&self, snapshot: Hash) -> Result<Vec<EndpointId>> {
         let mut ids = Vec::new();
         for author in self.index.holders(&snapshot.to_string()).await? {
@@ -333,8 +326,7 @@ impl Node {
         Ok(ids)
     }
 
-    /// Publishes where this client's file endpoint can be reached and whether it stays up, when
-    /// either has changed.
+    /// Publishes an `endpoint` claim whenever this peer's file address or serving status changes.
     async fn announce(&self) -> Result<()> {
         let now = claim::Endpoint {
             blobs: self.files_addr().await,
@@ -351,9 +343,8 @@ impl Node {
         Ok(())
     }
 
-    /// With a relay, only the relay address is announced: it is stable, and it keeps the
-    /// addresses of a home network out of public claims. Without one, the local addresses are
-    /// all there is.
+    /// Returns the endpoint address to advertise. When relays are configured, publishes only the
+    /// relay URL so local LAN IP addresses are not leaked into public claims.
     async fn files_addr(&self) -> EndpointAddr {
         let endpoint = self.files.endpoint();
         if self.config.relays.is_empty() {
@@ -372,8 +363,8 @@ impl Node {
     }
 }
 
-/// Moves every claim p2panda delivers into the index, then tells p2panda it is done with it.
-/// A claim that was not acknowledged is delivered again after a restart.
+/// Persists incoming p2panda claims into the SQLite index and acknowledges them after indexing.
+/// Unacknowledged operations are redelivered by p2panda after a restart.
 async fn consume(mut subscription: StreamSubscription<Claim>, index: Index, ended: watch::Sender<u64>) {
     while let Some(event) = subscription.next().await {
         match event {
@@ -386,10 +377,10 @@ async fn consume(mut subscription: StreamSubscription<Claim>, index: Index, ende
                 {
                     Ok(_) => {
                         if let Err(err) = operation.ack().await {
-                            eprintln!("delphi-p2p: could not acknowledge claim {id}: {err}");
+                            eprintln!("delphi-p2p: failed to acknowledge claim {id}: {err}");
                         }
                     }
-                    Err(err) => eprintln!("delphi-p2p: could not index claim {id}: {err}"),
+                    Err(err) => eprintln!("delphi-p2p: failed to index claim {id}: {err}"),
                 }
             }
             StreamEvent::SyncEnded { .. } => ended.send_modify(|n| *n += 1),
@@ -398,17 +389,17 @@ async fn consume(mut subscription: StreamSubscription<Claim>, index: Index, ende
     }
 }
 
-/// Runs a download to its end. A transfer that moves is left to finish however long it takes; one
-/// that brings nothing for a minute is dropped, and what it brought stays in the store.
+/// Drives a blob download to completion, aborting if no progress occurs within `STALLED`.
+/// Partially downloaded chunks remain cached in the local blob store.
 async fn transfer(download: DownloadProgress) -> Result<()> {
     let mut items = download.stream().await.map_err(|err| anyhow::anyhow!("{err}"))?;
     loop {
         match timeout(STALLED, items.next()).await {
             Ok(Some(DownloadProgressItem::Error(err))) => bail!("{err}"),
-            Ok(Some(DownloadProgressItem::DownloadError)) => bail!("no client that holds it could send it"),
+            Ok(Some(DownloadProgressItem::DownloadError)) => bail!("failed to download from available peers"),
             Ok(Some(_)) => {}
             Ok(None) => return Ok(()),
-            Err(_) => bail!("the transfer stalled"),
+            Err(_) => bail!("transfer stalled"),
         }
     }
 }

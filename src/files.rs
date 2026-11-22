@@ -1,8 +1,8 @@
-//! Snapshots: a directory as one hash.
+//! Directory snapshots backed by iroh-blobs collections.
 //!
-//! A snapshot is an iroh-blobs collection. It lists every file's path and BLAKE3 hash, and its
-//! own hash names the whole directory at that moment. Two snapshots that share a file share its
-//! bytes in the store and on the wire.
+//! Each snapshot is an iroh-blobs collection mapping relative file paths to BLAKE3 content hashes,
+//! identified by a single root hash. Identical files are deduplicated across snapshots both on disk
+//! and over the network.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -14,8 +14,7 @@ use iroh_blobs::protocol::{ChunkRanges, ChunkRangesExt, ChunkRangesSeq, GetReque
 use iroh_blobs::{BlobFormat, Hash, HashAndFormat};
 use serde::Serialize;
 
-/// Directories that are never part of a snapshot: the client's own notes, version control, and
-/// Lean's build output, which is large and rebuilt from the sources.
+/// Directories excluded from snapshots: local client metadata, Git history, and Lean build artifacts.
 const SKIPPED: [&str; 3] = [".delphi", ".git", ".lake"];
 
 pub struct Snapshot {
@@ -24,7 +23,7 @@ pub struct Snapshot {
     pub bytes: u64,
 }
 
-/// Copies a directory into the store and returns its snapshot.
+/// Imports a directory into the blob store and returns its snapshot metadata.
 pub async fn import(store: &Store, dir: &Path) -> Result<Snapshot> {
     let mut paths = Vec::new();
     walk(dir, dir, &mut paths)?;
@@ -48,13 +47,13 @@ pub async fn import(store: &Store, dir: &Path) -> Result<Snapshot> {
             })
             .temp_tag()
             .await
-            .with_context(|| format!("could not store {name}"))?;
+            .with_context(|| format!("failed to store {name}"))?;
         collection.push(name.clone(), tag.hash());
         tags.push(tag);
     }
     let root = collection.store(store).await?;
     let hash = root.hash();
-    // A named tag keeps the snapshot and its files from being collected as garbage.
+    // Pin the snapshot with a named tag to prevent garbage collection.
     store
         .tags()
         .set(format!("snapshot/{hash}"), HashAndFormat::hash_seq(hash))
@@ -66,7 +65,7 @@ pub async fn import(store: &Store, dir: &Path) -> Result<Snapshot> {
     })
 }
 
-/// Writes the files of a snapshot that is complete in the store into `dir`.
+/// Exports all files of a locally complete snapshot into `dir`.
 pub async fn export(store: &Store, hash: Hash, dir: &Path) -> Result<u64> {
     let collection = Collection::load(hash, store).await?;
     std::fs::create_dir_all(dir)?;
@@ -82,7 +81,7 @@ pub async fn export(store: &Store, hash: Hash, dir: &Path) -> Result<u64> {
     Ok(files)
 }
 
-/// One file of a snapshot.
+/// Single file entry within a snapshot.
 #[derive(Clone, Serialize)]
 pub struct Entry {
     pub path: String,
@@ -90,15 +89,15 @@ pub struct Entry {
     pub hash: String,
 }
 
-/// What listing a snapshot needs from a client that holds it: the list of names and hashes in
-/// full, and the last chunk of each file, which proves the file's size. The files themselves
-/// stay where they are, except those of up to 1024 bytes, which are one chunk.
+/// Builds a partial iroh-blobs request for listing a snapshot without downloading full files:
+/// fetches the collection metadata in full plus only the last chunk of each blob to verify sizes
+/// (files up to 1,024 bytes fit in a single chunk).
 pub fn listing(hash: Hash) -> GetRequest {
     let ranges = [ChunkRanges::all(), ChunkRanges::all(), ChunkRanges::last_chunk()];
     GetRequest::new(hash, ChunkRangesSeq::from_ranges_infinite(ranges))
 }
 
-/// The files of a snapshot, or `None` while the list or a file's size is not in the store.
+/// Returns the snapshot's file list, or `None` if the collection or any file size is not yet stored.
 pub async fn list(store: &Store, hash: Hash) -> Result<Option<Vec<Entry>>> {
     let Ok(collection) = Collection::load(hash, store).await else {
         return Ok(None);
@@ -117,17 +116,17 @@ pub async fn list(store: &Store, hash: Hash) -> Result<Option<Vec<Entry>>> {
     Ok(Some(entries))
 }
 
-/// Whether every file of the snapshot is already in the store.
+/// Returns true if every file in the snapshot is present in the local store.
 pub async fn complete(store: &Store, hash: Hash) -> Result<bool> {
     Ok(store.remote().local(HashAndFormat::hash_seq(hash)).await?.is_complete())
 }
 
-/// A path from somebody else's snapshot, accepted only if it stays inside the target directory.
+/// Validates that a relative path from an untrusted snapshot stays within the target directory.
 pub fn checked(name: &str) -> Result<PathBuf> {
     let path = Path::new(name);
     let inside = !name.is_empty() && path.components().all(|part| matches!(part, Component::Normal(_)));
     if !inside {
-        bail!("the snapshot names a file outside its directory: {name:?}");
+        bail!("snapshot contains a path outside the target directory: {name:?}");
     }
     Ok(path.to_path_buf())
 }
@@ -145,11 +144,11 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<()> {
             let relative = entry.path().strip_prefix(root)?.to_path_buf();
             let name = relative
                 .to_str()
-                .context("a file name is not UTF-8")?
+                .context("file path is not valid UTF-8")?
                 .replace('\\', "/");
             out.push(name);
         }
-        // Symbolic links are left out: a snapshot holds files, and a link can point anywhere.
+        // Skip symlinks so snapshots contain only regular files inside the directory.
     }
     Ok(())
 }
@@ -159,7 +158,7 @@ mod tests {
     use super::checked;
 
     #[test]
-    fn a_snapshot_cannot_write_outside_its_directory() {
+    fn snapshot_paths_stay_within_directory() {
         assert!(checked("Proof.lean").is_ok());
         assert!(checked("src/Proof.lean").is_ok());
         assert!(checked("../escape").is_err());

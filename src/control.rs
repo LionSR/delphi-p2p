@@ -1,7 +1,7 @@
-//! The control socket of a running client.
+//! Unix control socket for forwarding CLI commands to a running `delphi-p2p serve` process.
 //!
-//! The stores can be open in one process only. While `delphi-p2p serve` runs, the other commands
-//! send themselves to it over a Unix socket in the client's directory and print its reply.
+//! Because the SQLite databases and blob store can only be opened by one process at a time,
+//! CLI invocations connect to the active server over this socket and print its response.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -20,7 +20,7 @@ enum Reply {
     Failed(String),
 }
 
-/// Sends a command to the client running on this directory. `None` when none is running.
+/// Sends a command to the running `serve` process, or returns `Ok(None)` if none is listening.
 pub async fn send(socket: &Path, command: &Command) -> Result<Option<Result<String>>> {
     let Ok(mut stream) = UnixStream::connect(socket).await else {
         return Ok(None);
@@ -30,21 +30,21 @@ pub async fn send(socket: &Path, command: &Command) -> Result<Option<Result<Stri
         .await?;
     let mut line = String::new();
     BufReader::new(stream).read_line(&mut line).await?;
-    let reply: Reply = serde_json::from_str(&line).context("the running client sent no reply")?;
+    let reply: Reply = serde_json::from_str(&line).context("running server closed connection without replying")?;
     Ok(Some(match reply {
         Reply::Done(text) => Ok(text),
         Reply::Failed(error) => Err(anyhow::anyhow!(error)),
     }))
 }
 
-/// Opens the socket. Commands that connect from now on wait in its queue until `serve` runs.
+/// Binds the control socket so incoming connections queue until `serve` starts accepting them.
 pub fn bind(socket: &Path) -> Result<UnixListener> {
-    // A socket file left by a client that was killed would refuse the bind.
+    // Remove any stale socket file left behind after an unclean exit.
     let _ = std::fs::remove_file(socket);
     UnixListener::bind(socket).with_context(|| format!("{}", socket.display()))
 }
 
-/// Answers commands on the socket until the process is stopped.
+/// Accepts and handles commands on the control socket until shutdown.
 pub async fn serve(listener: UnixListener, node: Arc<Node>) -> Result<()> {
     loop {
         let (stream, _) = listener.accept().await?;
@@ -66,7 +66,7 @@ async fn answer(stream: UnixStream, node: &Node) -> Result<()> {
             Ok(text) => Reply::Done(text),
             Err(err) => Reply::Failed(format!("{err:#}")),
         },
-        Err(err) => Reply::Failed(format!("not a command: {err}")),
+        Err(err) => Reply::Failed(format!("invalid command: {err}")),
     };
     write
         .write_all((serde_json::to_string(&reply)? + "\n").as_bytes())

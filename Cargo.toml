@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 repository = "https://github.com/LionSR/delphi-p2p"
 license = "Apache-2.0"
-description = "Delphi client: publish, fetch and check research artifacts peer to peer."
+description = "Publish, fetch, and check research artifacts peer to peer."
 rust-version = "1.96"
 
 [[bin]]

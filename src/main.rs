@@ -1,8 +1,7 @@
-//! `delphi-p2p`: publish, fetch and check research artifacts between clients, with no server in
-//! the middle.
+//! `delphi-p2p`: peer-to-peer CLI for publishing, fetching, and checking research artifacts.
 //!
-//! Claims are p2panda operations and files are iroh-blobs collections. This program is the
-//! thin part between them: what a claim says, where things live on disk, and the commands.
+//! Claims are synchronized as p2panda operations and file snapshots are transferred via iroh-blobs.
+//! This crate defines the claim schema, local SQLite index, CLI commands, and sandboxed Lean checker.
 
 mod check;
 mod claim;
@@ -30,14 +29,13 @@ use crate::ops::Command;
 #[command(
     name = "delphi-p2p",
     version,
-    about = "Publish, fetch and check research artifacts peer to peer."
+    about = "Publish, fetch, and check research artifacts peer to peer."
 )]
 struct Cli {
-    /// The client's directory. Default: $DELPHI_P2P_HOME, then ~/.delphi/p2p.
+    /// Data directory. Defaults to $DELPHI_P2P_HOME, then ~/.delphi/p2p.
     #[arg(long, global = true)]
     home: Option<PathBuf>,
-    /// Seconds a command that wrote claims stays up so that other clients can receive them,
-    /// when no `delphi-p2p serve` is running.
+    /// Seconds to stay online after writing claims so peers can sync them when `delphi-p2p serve` is not running.
     #[arg(long, global = true, default_value_t = 8)]
     linger: u64,
     #[command(subcommand)]
@@ -46,24 +44,24 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Top {
-    /// Create this client's keys and settings.
+    /// Initialize keys and configuration for this client.
     Init {
-        /// A relay to connect through. May be given more than once.
+        /// Relay URL to connect through (repeatable).
         #[arg(long = "relay")]
         relays: Vec<String>,
-        /// Another client to start from, as <its key>@<its relay URL>. May be given more than once.
+        /// Bootstrap peer as <public-key>@<relay-URL> (repeatable).
         #[arg(long = "bootstrap")]
         bootstrap: Vec<String>,
-        /// The agent that will use this client, written into its claims.
+        /// Default agent name recorded in published claims.
         #[arg(long)]
         agent: Option<String>,
-        /// Do not look for other clients on the local network.
+        /// Disable local-network mDNS peer discovery.
         #[arg(long)]
         no_mdns: bool,
     },
-    /// Stay up: keep in sync with other clients and serve files to them. Starts no agent.
+    /// Run continuously to sync claims and serve files to peers. Does not start any agent.
     Serve {
-        /// Also fetch the files of every version this client hears of, and serve those too.
+        /// Automatically download and serve files for every published version.
         #[arg(long)]
         mirror: bool,
     },
@@ -95,7 +93,7 @@ async fn run() -> Result<()> {
             home.keys()?;
             let started = Instant::now();
             let _lock = loop {
-                // A running client holds the stores, so it does the work.
+                // Forward to a running `serve` process, which holds the database and blob store locks.
                 if let Some(reply) = control::send(&home.socket(), &command).await? {
                     print!("{}", reply?);
                     return Ok(());
@@ -103,7 +101,7 @@ async fn run() -> Result<()> {
                 if let Some(lock) = home.lock()? {
                     break lock;
                 }
-                // Another command is using the directory and will be done soon.
+                // Wait for another short-lived command to release the data directory lock.
                 if started.elapsed() > Duration::from_secs(120) {
                     bail!(
                         "another delphi-p2p command has held {} for two minutes",
@@ -121,7 +119,7 @@ async fn run() -> Result<()> {
             if writes && result.is_ok() {
                 node.settle(Duration::from_secs(cli.linger)).await;
                 if !node.met_someone() {
-                    eprintln!("delphi-p2p: no other client was reachable; the claims go out the next time one is.");
+                    eprintln!("delphi-p2p: no peers were reachable; claims will sync when a peer connects.");
                 }
             }
             node.shutdown().await;
@@ -181,13 +179,13 @@ async fn serve(home: Home, mirror: bool) -> Result<()> {
     let _lock = home
         .lock()?
         .with_context(|| format!("another delphi-p2p process is using {}", home.dir.display()))?;
-    // The socket opens before the node starts, so a command typed meanwhile waits for it.
+    // Bind the control socket before spawning the node so concurrent CLI commands queue cleanly.
     let socket = home.socket();
     let listener = control::bind(&socket)?;
     let node = Arc::new(Node::spawn(home.clone(), true).await?);
     eprintln!("delphi-p2p: serving as {}", node.me);
     if let Err(err) = node.announce_all_held().await {
-        eprintln!("delphi-p2p: could not announce the files held: {err:#}");
+        eprintln!("delphi-p2p: failed to announce local snapshots: {err:#}");
     }
     if mirror {
         tokio::spawn(mirror_all(node.clone()));
@@ -202,9 +200,8 @@ async fn serve(home: Home, mirror: bool) -> Result<()> {
     Ok(())
 }
 
-/// How many versions a mirror fetches at once: those whose claim just arrived, and those it tries
-/// again. The two do not share slots, so versions whose holders are gone never keep a new one
-/// waiting while its author is still there.
+/// Concurrency limits for mirroring newly arrived versions vs. retrying older ones.
+/// Separate semaphores prevent unavailable historical snapshots from starving fresh publishes.
 const MIRROR_NEW: usize = 8;
 const MIRROR_AGAIN: usize = 4;
 
@@ -213,7 +210,7 @@ struct Slots {
     again: Semaphore,
 }
 
-/// Fetches the files of every version as its claim arrives, and says so.
+/// Watches for incoming publish claims, downloads their snapshots, and announces local availability.
 async fn mirror_all(node: Arc<Node>) {
     let slots = Arc::new(Slots {
         new: Semaphore::new(MIRROR_NEW),
@@ -221,7 +218,7 @@ async fn mirror_all(node: Arc<Node>) {
     });
     let mut arrivals = node.index.arrivals();
     let mut seen = 0;
-    // Versions known before this client started are tried like those tried again.
+    // Treat pre-existing claims on startup as retries so live publishes keep priority.
     let mut started = false;
     loop {
         let versions = match node.index.since(seen, Some("publish"), 500).await {
@@ -255,9 +252,8 @@ async fn mirror_all(node: Arc<Node>) {
     }
 }
 
-/// Fetches the files of one version and says that this client holds them. The author may run one
-/// command and be gone before the files are across, so a fetch that fails is tried again: after a
-/// minute, then at twice the interval each time up to an hour, for a week.
+/// Downloads a single version's snapshot and announces a `have` claim on success.
+/// Failed downloads retry with exponential backoff starting at 1 minute (capped at 1 hour) for 7 days.
 async fn mirror(node: Arc<Node>, slots: Arc<Slots>, new: bool, version: String, snapshot: String, hash: Hash) {
     let begun = Instant::now();
     let mut pause = Duration::from_secs(60);
@@ -283,7 +279,7 @@ async fn mirror(node: Arc<Node>, slots: Arc<Slots>, new: bool, version: String, 
                 eprintln!("delphi-p2p: mirror: gave up on version {version}: {err}");
                 return;
             }
-            Err(err) if first => eprintln!("delphi-p2p: mirror: {err}; it will be tried again"),
+            Err(err) if first => eprintln!("delphi-p2p: mirror: {err}; will retry"),
             Err(_) => {}
         }
         first = false;

@@ -1,18 +1,14 @@
-# delphi-p2p, the peer-to-peer client
+# delphi-p2p
 
-One program that every participant runs. Clients sync signed claims with each other and fetch files from whoever
-holds them. No machine is required for the others to keep working, including delphi.science.
+Use `delphi-p2p` to share research files and check Lean proofs. Peers fetch files by hash and
+exchange signed claims about which versions they hold or have checked. They can do this independently of delphi.science.
 
-It is the thin part between three things that already exist:
+[p2panda](https://github.com/p2panda/p2panda) 0.8 handles peer discovery and claim synchronization.
+[iroh-blobs](https://github.com/n0-computer/iroh-blobs) 0.105 handles file transfers.
+For Lean projects, the client runs `lake check` or `lake comparator` in a sandbox (Lean 4.35 or later).
 
-| Job | Done by |
-| --- | --- |
-| Signed claims, sync, finding other clients | [p2panda](https://github.com/p2panda/p2panda) 0.8 |
-| Files by hash | [iroh-blobs](https://github.com/n0-computer/iroh-blobs) 0.105 |
-| Judging a Lean proof | `lake check` and `lake comparator`, in Lean 4.35 and later |
-
-What this crate adds: what a claim says (`src/claim.rs`), a local index of the claims seen (`src/index.rs`), the
-commands (`src/ops.rs`) and a wrapper that runs the checker confined (`src/check.rs`).
+The claim format is in `src/claim.rs`, the local index in `src/index.rs`, the commands in `src/ops.rs`,
+and the checker in `src/check.rs`.
 
 ## Install
 
@@ -51,28 +47,30 @@ delphi-p2p serve [--mirror]                             stay up and serve files;
 delphi-p2p status
 ```
 
-A command starts the client, does its work and stops it. While `delphi-p2p serve` runs on the same directory, the other
-commands hand themselves to it over a Unix socket. `delphi-p2p serve` starts no agent.
+By default the client exits when its command finishes. If `delphi-p2p serve` is running in the same
+data directory, commands connect to it over a Unix socket. The server runs independently of any agent.
 
-The author's files leave with the author's client, so `publish` waits until another client says it holds them (up to
-`--wait` seconds, 120 by default) and prints how many do as `Other-Holders`. The time a command waits is for a holder
-to be found: a transfer that has started runs to its end, and one that brings nothing for a minute is dropped. A
-client that mirrors tries a version it could not fetch again, after a minute and then at doubling intervals up to an
-hour, for a week.
+`publish` waits for another peer to report that it holds the files. The default wait is 120 seconds.
+`Other-Holders` reports how many other peers have announced a copy.
+
+When fetching files, `--wait` limits how long the client looks for a holder. Once a transfer starts,
+it can continue past that deadline. The client drops a transfer after a minute without data.
+A mirror retries a failed fetch after one minute, then doubles the interval up to one hour.
+It stops retrying after a week.
 
 ## Claims
 
 A claim is the body of one p2panda operation. p2panda's header carries the author's key, the signature and the time.
 
-| Kind | Refers to | Says |
+| Claim | Reference | Contents |
 | --- | --- | --- |
 | `publish` | the version it follows, if any | title, authors, source, the snapshot's hash, file count and size |
 | `have` | a `publish` | this client holds that snapshot and serves it |
-| `endpoint` | nothing | where this client's file endpoint is reached, and whether the client stays up; the newest counts |
+| `endpoint` | nothing | file endpoint address and availability (latest claim applies) |
 | `check` | a `publish` | the checker, the toolchain, how it was confined, `pass` or `fail` |
 
 A `publish` claim may also name a comparator configuration inside the snapshot (`--comparator <path>`). Many records
-can then share one snapshot of a large Lean project and differ only in the challenge they are judged against.
+can then share one snapshot of a large Lean project and differ only in the challenge used for each check.
 
 A snapshot is an iroh-blobs collection: one BLAKE3 hash for a directory, listing each path and its hash. A version is
 a `publish` claim. The current version of a record is the newest one by the record's first author that none of that
@@ -84,10 +82,10 @@ that the kernel, the axioms or the comparison with the challenge rejected the pr
 
 ## On disk
 
-`~/.delphi/p2p`, or `$DELPHI_P2P_HOME`, or `--home`. It sits beside the files of `delphi`, the command line for
-the website (`~/.delphi/key`), and shares nothing with them yet:
+The default data directory is `~/.delphi/p2p`. Set `$DELPHI_P2P_HOME` or pass `--home` to use another directory.
+The website CLI stores its credentials separately in `~/.delphi/key`.
 
-| File | What |
+| Path | Contents |
 | --- | --- |
 | `keys.json` | the two secrets: the key that signs claims, and the key of the file endpoint. Mode 600. |
 | `config.json` | relays, bootstrap clients, the agent's name |
@@ -111,11 +109,10 @@ Everyone else runs `delphi-p2p init --relay https://relay.example --bootstrap <s
 than one `--relay` and `--bootstrap` may be given. Without a relay, clients find each other on the local network
 only.
 
-The seed is where a new client starts, and nothing more. A client that runs `delphi-p2p serve` says so in its `endpoint`
-claim, and every client starts its search for peers from the always-on clients it has heard of as well as from its
-settings. Once a second client serves, the seed can go and the rest still find each other. Only the author of a
-record and the always-on clients announce that they hold its files: a client that stops after one command cannot
-serve them.
+New clients use the seed for peer discovery. They also look for peers in their settings and in
+`endpoint` claims from clients running `delphi-p2p serve`. Once clients know about a second server,
+they can reconnect through it if the seed goes offline. The publisher and serving clients announce
+which files they hold.
 
 ## Checking on a Mac
 

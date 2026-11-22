@@ -3,14 +3,9 @@
 Use `delphi-p2p` to share research files and check Lean proofs. Peers fetch files by content hash and
 exchange signed claims about which versions they hold or have checked, without relying on delphi.science.
 
-[p2panda](https://github.com/p2panda/p2panda) 0.8 handles peer discovery and claim synchronization.
-[iroh-blobs](https://github.com/n0-computer/iroh-blobs) 0.105 handles file transfers.
-For Lean projects, the client runs `lake check` or `lake comparator` in a sandbox (Lean 4.35 or later).
+## Using the client
 
-The claim format is in `src/claim.rs`, the local index in `src/index.rs`, the commands in `src/ops.rs`,
-and the checker in `src/check.rs`.
-
-## Install
+### Install and join a network
 
 Requires Rust 1.96 or later on Linux or macOS:
 
@@ -23,19 +18,7 @@ delphi-p2p --help
 
 To join an existing network, get the relay URL and bootstrap key from the network operator, then run `delphi-p2p init`.
 
-## Build and test
-
-```bash
-cargo build                                  # Rust 1.96 or later
-cargo test                                   # unit tests
-RELAY_BIN=/path/to/iroh-relay tests/e2e.sh   # run a local relay, seed peer, and three clients
-```
-
-`tests/e2e.sh` requires Lean (`elan`) and an `iroh-relay` binary (`cargo install iroh-relay --features server`). By
-default it runs checks without a sandbox on its generated test projects; set `RUNNER=docker` to run checks inside
-the Docker sandbox.
-
-## Commands
+### Commands
 
 ```
 delphi-p2p init --relay <URL> --bootstrap <key>@<URL>   initialize keys and configuration
@@ -59,7 +42,46 @@ starts, it can continue past that deadline; stalled transfers are dropped if no 
 When running with `--mirror`, failed downloads are retried with exponential backoff starting at 1 minute (capped at
 1 hour) for up to 7 days.
 
-## Claims
+### Checking on macOS
+
+`lake check` uses bubblewrap for sandboxing, which is Linux-only. On macOS and other non-Linux platforms,
+`delphi-p2p check` builds a small Docker image (`docker/lean-check.Dockerfile`), copies the snapshot into a container
+with networking disabled, and runs the same Lake command inside it. This requires a running Docker daemon. On an
+Ubuntu-based Docker VM such as colima, bubblewrap also requires enabling unprivileged user namespaces:
+
+```bash
+colima ssh -- sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+```
+
+The container runs with Docker's seccomp and AppArmor profiles disabled so bubblewrap can create namespaces inside it.
+Project code still runs inside bubblewrap as an unprivileged user without network access.
+
+## Running a network
+
+A network requires a relay server so peers behind NAT or firewalls can connect, along with at least one always-on peer
+to bootstrap discovery and mirror files.
+
+```bash
+iroh-relay --config relay.toml                  # run an iroh relay server
+delphi-p2p init --relay https://relay.example   # initialize the seed peer
+delphi-p2p serve --mirror                       # serve and mirror files
+```
+
+Other peers join by running `delphi-p2p init --relay https://relay.example --bootstrap <seed key>@https://relay.example`.
+Both `--relay` and `--bootstrap` can be passed multiple times. Without a relay, peers discover each other on the local
+network only (via mDNS).
+
+New peers use the seed peer for initial discovery and also load peers from `config.json` and from `endpoint` claims
+published by serving peers. Once peers learn about another serving node, they can reconnect through it if the seed
+goes offline. Publishers and serving peers announce which snapshots they hold via `have` claims.
+
+## Technical reference
+
+[p2panda](https://github.com/p2panda/p2panda) 0.8 handles peer discovery and claim synchronization.
+[iroh-blobs](https://github.com/n0-computer/iroh-blobs) 0.105 handles file transfers.
+For Lean projects, the client runs `lake check` or `lake comparator` in a sandbox (Lean 4.35 or later).
+
+### Claims and versions
 
 Each claim is stored as the payload of a p2panda operation. The p2panda header holds the author's public key,
 signature, and timestamp.
@@ -84,7 +106,7 @@ counted once per signing key.
 If the checker fails to run or the project fails to compile, no claim is published. A `fail` verdict is signed only
 when Lake explicitly reports a kernel rejection, a disallowed axiom, or a challenge mismatch.
 
-## On disk
+### Local storage
 
 The default data directory is `~/.delphi/p2p`. Set `$DELPHI_P2P_HOME` or pass `--home` to use another directory.
 The website CLI stores its credentials separately in `~/.delphi/key`.
@@ -98,40 +120,7 @@ The website CLI stores its credentials separately in `~/.delphi/key`.
 | `blobs/` | iroh-blobs content-addressed file store |
 | `work/` | temporary directory where `check` unpacks snapshots |
 
-## Running a network
-
-A network requires a relay server so peers behind NAT or firewalls can connect, along with at least one always-on peer
-to bootstrap discovery and mirror files.
-
-```bash
-iroh-relay --config relay.toml                  # run an iroh relay server
-delphi-p2p init --relay https://relay.example   # initialize the seed peer
-delphi-p2p serve --mirror                       # serve and mirror files
-```
-
-Other peers join by running `delphi-p2p init --relay https://relay.example --bootstrap <seed key>@https://relay.example`.
-Both `--relay` and `--bootstrap` can be passed multiple times. Without a relay, peers discover each other on the local
-network only (via mDNS).
-
-New peers use the seed peer for initial discovery and also load peers from `config.json` and from `endpoint` claims
-published by serving peers. Once peers learn about another serving node, they can reconnect through it if the seed
-goes offline. Publishers and serving peers announce which snapshots they hold via `have` claims.
-
-## Checking on macOS
-
-`lake check` uses bubblewrap for sandboxing, which is Linux-only. On macOS and other non-Linux platforms,
-`delphi-p2p check` builds a small Docker image (`docker/lean-check.Dockerfile`), copies the snapshot into a container
-with networking disabled, and runs the same Lake command inside it. This requires a running Docker daemon. On an
-Ubuntu-based Docker VM such as colima, bubblewrap also requires enabling unprivileged user namespaces:
-
-```bash
-colima ssh -- sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-```
-
-The container runs with Docker's seccomp and AppArmor profiles disabled so bubblewrap can create namespaces inside it.
-Project code still runs inside bubblewrap as an unprivileged user without network access.
-
-## Current limitations
+### Current limitations
 
 - **Single topic.** Every peer syncs all claims; p2panda sync overhead grows with the number of authors in a topic.
 - **File-level deduplication only.** iroh-blobs deduplicates whole files, not chunks, so modifying a file transfers the full file again.
@@ -141,3 +130,18 @@ Project code still runs inside bubblewrap as an unprivileged user without networ
 - **3,000-byte claim limit.** Claims are capped at 3,000 bytes to fit within p2panda's default gossip message size.
 - **Per-key check counts.** Signing keys are not yet linked to verified identities, so multiple keys controlled by the same person count separately.
 - **Pre-1.0 dependencies.** Both `p2panda` and `iroh-blobs` are pre-1.0; breaking changes to p2panda's operation format will require re-signing claims.
+
+## Development
+
+The claim format is in `src/claim.rs`, the local index in `src/index.rs`, the commands in `src/ops.rs`,
+and the checker in `src/check.rs`.
+
+```bash
+cargo build                                  # Rust 1.96 or later
+cargo test                                   # unit tests
+RELAY_BIN=/path/to/iroh-relay tests/e2e.sh   # run a local relay, seed peer, and three clients
+```
+
+`tests/e2e.sh` requires Lean (`elan`) and an `iroh-relay` binary (`cargo install iroh-relay --features server`). By
+default it runs checks without a sandbox on its generated test projects; set `RUNNER=docker` to run checks inside
+the Docker sandbox.

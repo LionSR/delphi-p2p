@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# End-to-end run of the client on one machine: a relay, a seed, and three other clients.
+# End-to-end test on a single machine: one relay, one seed peer, and three clients.
 #
-# It walks the acceptance list of the MVP: publish, list and fetch while the publisher is
-# offline, two keys checking the same proof, a new version, a fork, a rejected proof, and the
-# same work again after the seed is switched off.
+# Covers publish, listing and fetching while the publisher is offline, two keys
+# checking the same proof, publishing a new version, forking, rejecting an invalid
+# proof, lake comparator checks, failing builds, and continuing after the seed stops.
 #
 #   RELAY_BIN=/path/to/iroh-relay tests/e2e.sh
 #
-# RELAY_BIN  the iroh-relay binary (cargo install iroh-relay --features server). Not needed
-#            when a relay already listens on localhost:3340.
-# RUNNER     how `check` confines the project: none (default here, the test projects are ours),
-#            docker or bwrap.
-# DELPHI_P2P the client binary. Default: target/debug/delphi-p2p.
+# RELAY_BIN   Path to the iroh-relay binary (`cargo install iroh-relay --features server`).
+#             Not needed if a relay is already listening on localhost:3340.
+# RUNNER      Sandbox runner for `check`: none (default for generated test projects),
+#             docker, or bwrap.
+# DELPHI_P2P  Path to the client binary. Default: target/debug/delphi-p2p.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -29,12 +29,12 @@ trap cleanup EXIT
 
 step() { printf '\n== %s\n' "$*"; }
 fail() { printf 'FAILED: %s\n' "$*" >&2; exit 1; }
-# field <name> <text>: the value of a "Name: value" line.
+# field <name> <text>: extract the value from a "Name: value" line.
 field() { awk -v name="$1:" '$1 == name { print $2; exit }' <<<"$2"; }
 expect() { grep -qF -- "$2" <<<"$1" || fail "expected \"$2\" in:
 $1"; }
 client() { local home=$1; shift; "$DELPHI_P2P" --home "$root/$home" "$@"; }
-# serve <name>: an always-on client in the background. Its process id is in $!.
+# serve <name>: start a background mirroring peer; its PID is in $!.
 serve() { "$DELPHI_P2P" --home "$root/$1" serve --mirror >"$root/$1.log" 2>&1 & }
 
 if ! curl -s -o /dev/null "$RELAY"; then
@@ -51,7 +51,7 @@ lean_project() { # lean_project <dir> <theorem body>
 	printf '%s\n' "$2" >"$1/Toy.lean"
 }
 
-step "Four clients: a seed and three others that start from it"
+step "Initialize a seed peer and three clients"
 client seed init --relay "$RELAY" --no-mdns >/dev/null
 seed=$(field Node "$(client seed status)")
 for name in ann ben cy; do
@@ -65,30 +65,30 @@ pids+=($seed_pid)
 
 step "Ann publishes a Lean proof"
 lean_project "$root/proof" 'theorem two_add_two : 2 + 2 = 4 := rfl'
-# A file of more than one chunk (1024 bytes), so that listing and fetching differ.
+# Larger than one 1024-byte chunk so file listing and full downloads behave differently.
 head -c 5000 /dev/zero | tr '\0' 'n' >"$root/proof/Notes.txt"
 out=$(client ann publish "$root/proof" --title "Two plus two" --author "Ann")
 echo "$out"
 v1=$(field Id "$out")
 [ -n "$v1" ] || fail "publish printed no id"
-# Publish returns once the seed has the files, so they outlast this command.
+# Publish waits until the seed mirrors the files so they remain available after exit.
 expect "$out" "Other-Holders: 1"
 
-step "Cy lists its files while Ann is offline, without fetching them"
+step "Cy lists files while Ann is offline, without downloading them"
 out=$(client cy files "$v1")
 echo "$out"
 expect "$out" "Files: 5 ("
 expect "$out" "$(printf -- '-\t5000\t')"
 expect "$out" "$(printf '\tToy.lean')"
-# With no time to ask anyone, get succeeds only if the files are already here.
+# With --wait 0, get succeeds only if the files are already stored locally.
 if client cy get "$v1" --files "$root/cy-none" --wait 0 >/dev/null 2>&1; then fail "listing fetched the files"; fi
 
-step "Ben fetches it while Ann is offline: the files come from the seed"
+step "Ben fetches the version from the seed while Ann is offline"
 out=$(client ben get "$v1" --files "$root/ben-copy")
 echo "$out"
 cmp "$root/proof/Toy.lean" "$root/ben-copy/Toy.lean" || fail "Ben's copy differs"
 
-step "Ben and Cy each re-run the checker and sign the result"
+step "Ben and Cy each run the checker and sign the verdict"
 out=$(client ben check "$v1" --runner "$RUNNER")
 echo "$out"
 expect "$out" "Result: pass"
@@ -112,7 +112,7 @@ expect "$out" "Compared-With: $v1"
 expect "$(grep 'Toy.lean$' <<<"$out")" "changed"
 expect "$(grep 'Notes.txt$' <<<"$out")" "same"
 
-step "Fetching the record by its first id now gives the second version"
+step "Fetching by the first version ID resolves to the second version"
 out=$(client cy get "$v1" --files "$root/cy-copy")
 expect "$out" "Id: $v2"
 expect "$out" "Checks: 0 pass, 0 fail"
@@ -121,7 +121,7 @@ out=$(client cy get "$v1" --exact --files "$root/cy-old")
 expect "$out" "Id: $v1"
 expect "$out" "Checks: 2 pass, 0 fail"
 
-step "Ben publishes his own change: a fork, which does not replace Ann's version"
+step "Ben publishes a fork, which does not replace Ann's current version"
 printf '\ntheorem three : 1 + 2 = 3 := rfl\n' >>"$root/ben-copy/Toy.lean"
 rm "$root/ben-copy/Notes.txt"
 printf 'Ben added a theorem.\n' >"$root/ben-copy/Changes.txt"
@@ -139,7 +139,7 @@ expect "$(grep "^$v2" <<<"$out")" "current"
 expect "$(grep "^$fork" <<<"$out")" "fork"
 expect "$(grep "^$v1" <<<"$out")" "pass=2"
 
-step "A proof that rests on sorry is rejected, and the rejection is signed"
+step "A proof using sorry is rejected and the fail verdict is signed"
 lean_project "$root/bad" 'theorem wrong : 1 + 1 = 3 := sorry'
 bad=$(field Id "$(client ann publish "$root/bad" --title "One plus one is three")")
 out=$(client cy check "$bad" --runner "$RUNNER")
@@ -147,7 +147,7 @@ echo "$out"
 expect "$out" "Result: fail"
 expect "$out" "Checks: 0 pass, 1 fail"
 
-step "A proof judged against a challenge: lake comparator, with its configuration named in the claim"
+step "A proof checked against a challenge via lake comparator with config path in the claim"
 lean_project "$root/cmp" 'theorem unused : True := trivial'
 printf 'name = "toy"\n\n[[lean_lib]]\nname = "Challenge"\n\n[[lean_lib]]\nname = "Solution"\n' >"$root/cmp/lakefile.toml"
 rm "$root/cmp/Toy.lean"
@@ -161,20 +161,20 @@ echo "$out"
 expect "$out" "lake comparator --config challenges/sum_comm.json"
 expect "$out" "Result: pass"
 
-step "A project that does not build gets no verdict at all"
+step "A project that fails to compile produces no verdict"
 lean_project "$root/broken" 'theorem broken : 1 + 1 = 2 := by exact nonsense'
 broken=$(field Id "$(client ann publish "$root/broken" --title "Does not compile")")
 if out=$(client cy check "$broken" --runner "$RUNNER" 2>&1); then fail "a broken build produced a verdict: $out"; fi
 expect "$out" "did not reach a verdict"
 
-step "Ann starts serving too, and the others hear of it"
+step "Ann starts serving and other peers discover her endpoint"
 serve ann
 pids+=($!)
 sleep 15
 client cy log --kind endpoint >/dev/null
 client ben log --kind endpoint >/dev/null
 
-step "The seed is switched off. The others carry on among themselves"
+step "Stop the seed peer and verify remaining peers continue syncing"
 kill "$seed_pid"
 wait "$seed_pid" 2>/dev/null || true
 if kill -0 "$seed_pid" 2>/dev/null; then fail "the seed is still running"; fi
@@ -189,8 +189,7 @@ expect "$out" "Result: pass"
 out=$(client ann log "$later")
 echo "$out"
 expect "$out" "pass=1"
-# Cy published it and Ann mirrors it. The seed, being off, does not hold it, and Ben, who
-# stops after each command, does not claim to.
+# Cy published it and Ann mirrored it. The stopped seed does not hold it, and Ben does not serve.
 expect "$out" "holders=2"
 
 printf '\nAll steps passed.\n'

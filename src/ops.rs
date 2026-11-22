@@ -1,7 +1,7 @@
-//! The commands. Each takes a running client and returns the text it prints.
+//! CLI command definitions and handlers.
 //!
-//! `Command` is the one definition of a command: clap reads the command line into it, and the
-//! same value travels over the control socket to a client that is already running.
+//! `Command` is parsed by clap and also serialized over the Unix control socket when forwarding
+//! requests to a running `delphi-p2p serve` process.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -20,75 +20,73 @@ use crate::node::Node;
 
 #[derive(Clone, Debug, Subcommand, Serialize, Deserialize)]
 pub enum Command {
-    /// Publish a directory: a new record, or a new version of the one it was fetched from.
+    /// Publish a directory as a new record or as a new version of an existing one.
     Publish {
         dir: PathBuf,
-        /// Needed for a new record. A new version keeps the title of the one it follows.
+        /// Record title (required for a new record; inherited from the parent version otherwise).
         #[arg(long)]
         title: Option<String>,
-        /// May be given more than once.
+        /// Author name (repeatable).
         #[arg(long = "author")]
         authors: Vec<String>,
-        /// Where it comes from, for example the paper's URL.
+        /// Source URL (for example, a paper or delphi.science record URL).
         #[arg(long)]
         source: Option<String>,
-        /// What changed in this version.
+        /// Summary of changes in this version.
         #[arg(long)]
         note: Option<String>,
-        /// The version this one follows. Default: the version the directory was fetched from.
+        /// Parent version ID. Defaults to the version recorded in `.delphi/origin.json`.
         #[arg(long)]
         after: Option<String>,
-        /// For a Lean project judged against a challenge: the comparator configuration, as a
-        /// path inside the directory. Default: `comparator.json` if there is one.
+        /// Relative path inside the directory to a `lake comparator` config file.
+        /// Defaults to `comparator.json` if present.
         #[arg(long)]
         comparator: Option<String>,
-        /// The agent doing this, written into the claim.
+        /// Agent name recorded in the published claim.
         #[arg(long)]
         agent: Option<String>,
-        /// Seconds to wait for another client to take the files, so that they can be fetched
-        /// after this command ends. 0 does not wait.
+        /// Seconds to wait for another peer to mirror the files before exiting (0 disables waiting).
         #[arg(long, default_value_t = 120)]
         wait: u64,
     },
-    /// Fetch the files of a record into a directory.
+    /// Download a record's files into a local directory.
     Get {
-        /// A record or any version of it. Fetches the original author's newest version.
+        /// Record ID, version ID, or unique prefix. Resolves to the original author's latest version.
         id: String,
-        /// Where to put the files. Default: a new directory named after the id.
+        /// Target directory. Defaults to a new directory named after the ID prefix.
         #[arg(long)]
         files: Option<PathBuf>,
-        /// Fetch exactly the version named, not the newest.
+        /// Download the exact specified version instead of resolving to the latest version.
         #[arg(long)]
         exact: bool,
-        /// Seconds to wait for the claim and for a client that holds the files.
+        /// Seconds to wait for the claim and a peer holding the files.
         #[arg(long, default_value_t = 30)]
         wait: u64,
         #[arg(long)]
         agent: Option<String>,
     },
-    /// List the files of a version, and what changed since the version it follows. Fetches the
-    /// list from a client that holds the files, not the files.
+    /// List files in a version and diff them against its parent without downloading file contents.
     Files {
-        /// A record or any version of it. Lists the original author's newest version.
+        /// Record ID, version ID, or unique prefix. Lists the original author's latest version.
         id: String,
-        /// List exactly the version named, not the newest.
+        /// List the exact specified version instead of resolving to the latest version.
         #[arg(long)]
         exact: bool,
-        /// Seconds to wait for the claim and for a client that holds the files.
+        /// Seconds to wait for the claim and a peer holding the files.
         #[arg(long, default_value_t = 30)]
         wait: u64,
         #[arg(long)]
         json: bool,
     },
-    /// Re-run the Lean checker on a version and sign the result.
+    /// Run the Lean checker on a version in a sandbox and sign the verdict.
     Check {
         id: String,
-        /// Check exactly the version named, not the newest.
+        /// Check the exact specified version instead of resolving to the latest version.
         #[arg(long)]
         exact: bool,
         #[arg(long, value_enum, default_value_t)]
         runner: Runner,
-        /// Let the check reach the network to fetch the project's dependencies.
+        /// Allow network access during the build to fetch external dependencies.
         #[arg(long)]
         network: bool,
         #[arg(long, default_value_t = 30)]
@@ -96,13 +94,13 @@ pub enum Command {
         #[arg(long)]
         agent: Option<String>,
     },
-    /// List claims as they arrived, or with an id the versions of one record and their checks.
+    /// List received claims in arrival order, or inspect all versions and checks for one record.
     Log {
         id: Option<String>,
-        /// Only claims that arrived after this one: the first column of an earlier line.
+        /// Return only claims after this arrival sequence number (first column of `log` output).
         #[arg(long, default_value_t = 0)]
         since: i64,
-        /// Only this kind: publish, check, have or endpoint.
+        /// Filter by claim kind: publish, check, have, or endpoint.
         #[arg(long)]
         kind: Option<String>,
         #[arg(long, default_value_t = 200)]
@@ -110,12 +108,12 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Show this client's keys and what it holds.
+    /// Show this client's keys, relays, and local store counts.
     Status,
 }
 
 impl Command {
-    /// Paths are read where the command was typed, not where a running client happens to be.
+    /// Resolves relative paths against the caller's working directory before sending over the control socket.
     pub fn absolute(mut self) -> Result<Self> {
         match &mut self {
             Command::Publish { dir, .. } => *dir = std::path::absolute(&*dir)?,
@@ -130,7 +128,7 @@ impl Command {
         Ok(self)
     }
 
-    /// Whether the command leaves claims that other clients should receive before this one exits.
+    /// Returns true if the command publishes claims that should linger briefly to sync before exit.
     pub fn writes(&self) -> bool {
         matches!(
             self,
@@ -202,7 +200,7 @@ async fn publish(
     if let Some(config) = &comparator
         && !dir.join(files::checked(config)?).is_file()
     {
-        bail!("--comparator {config}: no such file in {}", dir.display());
+        bail!("--comparator {config}: file not found in {}", dir.display());
     }
     let origin = Origin::read(dir);
     let parent = match after.or_else(|| origin.as_ref().map(|o| o.version.clone())) {
@@ -218,12 +216,12 @@ async fn publish(
         bail!("nothing changed since version {}", stored.id);
     }
 
-    // A new version keeps what the one before it said, unless told otherwise.
+    // Inherit unspecified metadata fields from the parent version.
     let previous = parent.as_ref().map(|(_, publish)| publish);
     let body = claim::Publish {
         title: title
             .or_else(|| previous.map(|p| p.title.clone()))
-            .context("a new record needs --title")?,
+            .context("--title is required for a new record")?,
         authors: if authors.is_empty() {
             previous.map(|p| p.authors.clone()).unwrap_or_default()
         } else {
@@ -253,15 +251,14 @@ async fn publish(
     out.put("Title", &body.title);
     out.put("Snapshot", &hash);
     out.put("Files", format!("{} ({} bytes)", body.files, body.bytes));
-    // A client that stays up serves the files itself. One that stops with this command waits for
-    // another client to take them.
+    // Serving nodes keep serving the files directly; short-lived clients wait for a peer to mirror them.
     if !node.serving {
         let others = node.other_holders(&hash, wait).await?;
         out.put("Other-Holders", others);
         if others == 0 {
             out.put(
                 "Note",
-                "no other client holds the files yet; they can be fetched only while `delphi-p2p serve` runs here",
+                "no other peer holds the files yet; they are only downloadable while `delphi-p2p serve` is running locally",
             );
         }
     }
@@ -272,9 +269,12 @@ async fn get(node: &Node, id: &str, dir: &Path, exact: bool, wait: Duration, age
     let (stored, publish) = resolve(node, id, exact, wait).await?;
     let occupied = dir.read_dir().is_ok_and(|mut entries| entries.next().is_some());
     if occupied {
-        bail!("{} is not empty; name another directory with --files", dir.display());
+        bail!(
+            "{} is not empty; specify a different directory with --files",
+            dir.display()
+        );
     }
-    let hash = publish.snapshot.parse().context("the claim's snapshot is not a hash")?;
+    let hash = publish.snapshot.parse().context("invalid snapshot hash in claim")?;
     node.fetch(hash, wait).await?;
     files::export(&node.store, hash, dir).await?;
     Origin {
@@ -297,7 +297,7 @@ async fn get(node: &Node, id: &str, dir: &Path, exact: bool, wait: Duration, age
     Ok(out.text())
 }
 
-/// How a file differs from the same path in the version before.
+/// File status relative to the parent version.
 #[derive(Clone, Copy, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum Change {
@@ -320,7 +320,7 @@ impl Change {
 struct FileLine {
     #[serde(flatten)]
     file: files::Entry,
-    /// Absent when there is no earlier version to compare with.
+    /// Omitted when there is no parent version to diff against.
     #[serde(skip_serializing_if = "Option::is_none")]
     change: Option<Change>,
 }
@@ -328,10 +328,10 @@ struct FileLine {
 async fn files(node: &Node, id: &str, exact: bool, wait: Duration, json: bool) -> Result<String> {
     let deadline = tokio::time::Instant::now() + wait;
     let (stored, publish) = resolve(node, id, exact, wait).await?;
-    let hash = publish.snapshot.parse().context("the claim's snapshot is not a hash")?;
+    let hash = publish.snapshot.parse().context("invalid snapshot hash in claim")?;
     let list = node.list(hash, deadline - tokio::time::Instant::now()).await?;
 
-    // The version it follows, when a client that holds that one can be reached too.
+    // Fetch the parent version's manifest if available so we can compute file diffs.
     let mut before = None;
     for parent in &stored.claim.refs {
         if let Ok((earlier, body)) = version(node, parent, Duration::ZERO).await
@@ -400,10 +400,10 @@ async fn check(
     agent: Option<String>,
 ) -> Result<String> {
     let (stored, publish) = resolve(node, id, exact, wait).await?;
-    let hash = publish.snapshot.parse().context("the claim's snapshot is not a hash")?;
+    let hash = publish.snapshot.parse().context("invalid snapshot hash in claim")?;
     node.fetch(hash, wait).await?;
 
-    // The checker gets a fresh copy, so nothing left by an earlier run can sway it.
+    // Unpack into a clean directory so leftovers from earlier runs cannot affect the build.
     let dir = node.home.work(&publish.snapshot);
     if dir.exists() {
         std::fs::remove_dir_all(&dir)?;
@@ -451,7 +451,7 @@ async fn log(node: &Node, since: i64, kind: Option<&str>, limit: i64, json: bool
         let entries: Vec<_> = entries
             .iter()
             .map(|e| {
-                // `micros` is the time as signed; `at` is the same for people to read.
+                // `micros` is the raw signed timestamp; `at` is the ISO-8601 UTC string.
                 serde_json::json!({
                     "seq": e.seq, "id": e.id, "author": e.author, "at": date(e.at), "micros": e.at, "claim": e.claim,
                 })
@@ -475,7 +475,7 @@ async fn log(node: &Node, since: i64, kind: Option<&str>, limit: i64, json: bool
     Ok(text)
 }
 
-/// One line of the listing: what the claim says, without its ids.
+/// Short human-readable summary column for `log` output.
 fn summary(stored: &Stored) -> String {
     let claim = &stored.claim;
     if let Some(publish) = claim.read::<claim::Publish>() {
@@ -499,7 +499,7 @@ struct VersionLine {
     id: String,
     at: String,
     author: String,
-    /// "current", "earlier", "open" (the original author left two versions unjoined) or "fork".
+    /// `"current"`, `"earlier"`, `"open"` (multiple unmerged author heads), or `"fork"`.
     state: &'static str,
     snapshot: String,
     holders: usize,
@@ -595,22 +595,20 @@ async fn status(node: &Node) -> Result<String> {
     Ok(out.text())
 }
 
-/// The publish claim with this id, waiting up to `wait` for it to arrive.
+/// Fetches a `publish` claim by ID or prefix, waiting up to `wait` for it to sync.
 async fn version(node: &Node, id: &str, wait: Duration) -> Result<(Stored, claim::Publish)> {
     let stored = node
         .wait_for(id, wait)
         .await?
-        .with_context(|| format!("no claim {id} here yet"))?;
-    let publish = stored.claim.read::<claim::Publish>().with_context(|| {
-        format!(
-            "{} is a {} claim, not a version of a record",
-            stored.id, stored.claim.kind
-        )
-    })?;
+        .with_context(|| format!("claim {id} not found locally"))?;
+    let publish = stored
+        .claim
+        .read::<claim::Publish>()
+        .with_context(|| format!("{} is a {} claim, not a publish claim", stored.id, stored.claim.kind))?;
     Ok((stored, publish))
 }
 
-/// The version a command acts on: the one named, or the newest by the record's author.
+/// Resolves the target version: either the exact ID passed or the original author's latest head.
 async fn resolve(node: &Node, id: &str, exact: bool, wait: Duration) -> Result<(Stored, claim::Publish)> {
     let named = version(node, id, wait).await?;
     if exact {
@@ -622,17 +620,17 @@ async fn resolve(node: &Node, id: &str, exact: bool, wait: Duration) -> Result<(
         .versions
         .into_iter()
         .find(|(stored, _)| stored.id == head)
-        .expect("the head is a version"))
+        .expect("head version exists in record"))
 }
 
-/// Every version of one record that this client knows, the first one first.
+/// All known versions belonging to a single record, starting with the root version.
 struct Record {
     versions: Vec<(Stored, claim::Publish)>,
 }
 
 impl Record {
     async fn of(node: &Node, version: Stored) -> Result<Self> {
-        // Walk back to the first version this client knows.
+        // Walk backwards along parent refs to the earliest known version.
         let mut root = version;
         let mut seen = HashSet::from([root.id.clone()]);
         'back: loop {
@@ -647,7 +645,7 @@ impl Record {
             }
             break;
         }
-        // Then forward through everything that follows it.
+        // Traverse forward to collect all descendant versions and forks.
         let mut versions = Vec::new();
         let mut queue = vec![root];
         let mut listed = HashSet::new();
@@ -669,7 +667,7 @@ impl Record {
         &self.versions[0].0.author
     }
 
-    /// Versions by the original author that a later version by that author follows.
+    /// Version IDs superseded by a later version from the original author.
     fn followed_by_author(&self) -> HashSet<String> {
         self.versions
             .iter()
@@ -678,8 +676,8 @@ impl Record {
             .collect()
     }
 
-    /// The current version: the original author's newest that none of their versions follows.
-    /// Versions by other keys never replace it.
+    /// Current head version: the original author's latest unsuperseded version.
+    /// Forks by other keys never replace it.
     fn head(&self) -> &Stored {
         let followed = self.followed_by_author();
         self.versions
@@ -696,7 +694,7 @@ struct Tally {
     fail: usize,
 }
 
-/// Counts keys, not claims: each key's newest verdict on exactly this snapshot.
+/// Counts distinct signing keys using each key's latest verdict for this exact snapshot.
 async fn tally(node: &Node, stored: &Stored, publish: &claim::Publish) -> Result<Tally> {
     let mut verdicts = BTreeMap::new();
     for check in node.index.referring::<claim::Check>(&stored.id).await? {
@@ -712,7 +710,7 @@ async fn tally(node: &Node, stored: &Stored, publish: &claim::Publish) -> Result
     })
 }
 
-/// "Name: value" lines, as the HTTP command line prints them.
+/// Key-value output builder (`Name: value\n`), matching the `delphi` CLI format.
 #[derive(Default)]
 struct Fields(String);
 
@@ -726,11 +724,11 @@ impl Fields {
     }
 }
 
-/// Microseconds since 1970 as a UTC time, to the second.
+/// Formats microseconds since the Unix epoch as an ISO-8601 UTC timestamp (`YYYY-MM-DDTHH:MM:SSZ`).
 fn date(micros: u64) -> String {
     let seconds = micros / 1_000_000;
     let (days, rest) = (seconds / 86_400, seconds % 86_400);
-    // Days since 1970-01-01 to a calendar date, after Howard Hinnant's civil_from_days.
+    // Civil date conversion from days since 1970-01-01 (Howard Hinnant's algorithm).
     let z = days as i64 + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);
@@ -753,7 +751,7 @@ mod tests {
     use super::date;
 
     #[test]
-    fn dates_are_utc_calendar_dates() {
+    fn formats_utc_calendar_dates() {
         assert_eq!(date(0), "1970-01-01T00:00:00Z");
         assert_eq!(date(951_782_400_000_000), "2000-02-29T00:00:00Z");
         assert_eq!(date(1_795_342_500_000_000), "2026-11-22T10:15:00Z");

@@ -1,7 +1,7 @@
-//! The local index: every claim this client has seen, in a table it can query.
+//! Local SQLite index of received claims.
 //!
-//! p2panda keeps the signed operations. This keeps what the commands ask about: a claim by id,
-//! the claims that refer to another, and the order in which they arrived here.
+//! While p2panda stores raw signed operations, this index supports CLI queries by claim ID,
+//! reference links, snapshot hash, and local arrival order.
 
 use std::path::Path;
 
@@ -12,16 +12,16 @@ use tokio::sync::watch;
 
 use crate::claim::{Claim, Have, Kind, Publish};
 
-/// A claim as it sits in the index.
+/// Claim row stored in the local index.
 #[derive(Clone, Debug)]
 pub struct Stored {
-    /// Its place in the order of arrival at this client. `log --since` continues from one.
+    /// Monotonic local arrival sequence number used by `log --since`.
     pub seq: i64,
-    /// The id of the p2panda operation, in hex.
+    /// Hex-encoded p2panda operation ID.
     pub id: String,
-    /// The public key that signed it, in hex.
+    /// Hex-encoded author public key.
     pub author: String,
-    /// When the author wrote it, in microseconds since 1970. The author's clock says so.
+    /// Author-reported timestamp in microseconds since the Unix epoch.
     pub at: u64,
     pub claim: Claim,
 }
@@ -66,7 +66,7 @@ impl Index {
         })
     }
 
-    /// Stores a claim. Returns false when it was already here.
+    /// Inserts a claim into the index. Returns `false` if the claim ID already exists.
     pub async fn insert(&self, id: &str, author: &str, at: u64, claim: &Claim) -> Result<bool> {
         let snapshot = claim.data.get("snapshot").and_then(|v| v.as_str());
         let mut tx = self.pool.begin().await?;
@@ -98,15 +98,15 @@ impl Index {
         Ok(new)
     }
 
-    /// Changes whenever a claim arrives. Commands that wait for one watch this.
+    /// Returns a watch receiver notified whenever a new claim is inserted.
     pub fn arrivals(&self) -> watch::Receiver<u64> {
         self.arrivals.subscribe()
     }
 
-    /// The claim with this id, or with this unique beginning of an id.
+    /// Looks up a claim by full ID or unique hex prefix.
     pub async fn get(&self, id: &str) -> Result<Option<Stored>> {
         if id.is_empty() || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
-            bail!("not a claim id: {id}");
+            bail!("invalid claim ID: {id}");
         }
         let rows = sqlx::query("SELECT seq, id, author, at, body FROM claims WHERE id LIKE ? LIMIT 2")
             .bind(format!("{}%", id.to_ascii_lowercase()))
@@ -115,11 +115,11 @@ impl Index {
         match rows.len() {
             0 => Ok(None),
             1 => Ok(Some(stored(&rows[0])?)),
-            _ => bail!("more than one claim starts with {id}"),
+            _ => bail!("ambiguous claim ID prefix: {id}"),
         }
     }
 
-    /// Claims that arrived after `seq`, oldest first.
+    /// Returns claims with sequence number greater than `seq`, ordered oldest first.
     pub async fn since(&self, seq: i64, kind: Option<&str>, limit: i64) -> Result<Vec<Stored>> {
         let rows = sqlx::query(
             "SELECT seq, id, author, at, body FROM claims
@@ -134,7 +134,7 @@ impl Index {
         rows.iter().map(stored).collect()
     }
 
-    /// Claims of kind `K` that refer to `target`, oldest first.
+    /// Returns claims of kind `K` that reference `target`, ordered oldest first.
     pub async fn referring<K: Kind>(&self, target: &str) -> Result<Vec<Stored>> {
         let rows = sqlx::query(
             "SELECT c.seq, c.id, c.author, c.at, c.body FROM claims c
@@ -147,7 +147,7 @@ impl Index {
         rows.iter().map(stored).collect()
     }
 
-    /// The newest claim of kind `K` by `author`.
+    /// Returns the most recent claim of kind `K` by `author`.
     pub async fn latest_by<K: Kind>(&self, author: &str) -> Result<Option<Stored>> {
         let row = sqlx::query(
             "SELECT seq, id, author, at, body FROM claims
@@ -160,7 +160,7 @@ impl Index {
         row.as_ref().map(stored).transpose()
     }
 
-    /// Each author's newest claim of kind `K`, the most recent authors first.
+    /// Returns each author's latest claim of kind `K`, ordered by timestamp descending.
     pub async fn latest_of_each<K: Kind>(&self, limit: i64) -> Result<Vec<Stored>> {
         let rows = sqlx::query(
             "SELECT seq, id, author, at, body FROM claims c
@@ -176,7 +176,7 @@ impl Index {
         rows.iter().map(stored).collect()
     }
 
-    /// The keys that say they hold this snapshot.
+    /// Returns distinct author keys that have published a `have` claim for `snapshot`.
     pub async fn holders(&self, snapshot: &str) -> Result<Vec<String>> {
         let rows = sqlx::query("SELECT DISTINCT author FROM claims WHERE snapshot = ? AND kind = ?")
             .bind(snapshot)
@@ -186,7 +186,7 @@ impl Index {
         Ok(rows.iter().map(|row| row.get::<String, _>(0)).collect())
     }
 
-    /// Every publish claim, oldest first.
+    /// Returns all `publish` claims in arrival order.
     pub async fn publishes(&self) -> Result<Vec<Stored>> {
         let rows = sqlx::query("SELECT seq, id, author, at, body FROM claims WHERE kind = ? ORDER BY seq")
             .bind(Publish::NAME)
@@ -203,7 +203,7 @@ impl Index {
     }
 }
 
-/// Reads a row selected as `seq, id, author, at, body`.
+/// Decodes a SQLite row selected as `(seq, id, author, at, body)`.
 fn stored(row: &sqlx::sqlite::SqliteRow) -> Result<Stored> {
     let body: String = row.get(4);
     Ok(Stored {
@@ -211,6 +211,6 @@ fn stored(row: &sqlx::sqlite::SqliteRow) -> Result<Stored> {
         id: row.get(1),
         author: row.get(2),
         at: row.get::<i64, _>(3) as u64,
-        claim: serde_json::from_str(&body).context("a stored claim does not parse")?,
+        claim: serde_json::from_str(&body).context("failed to parse stored claim")?,
     })
 }

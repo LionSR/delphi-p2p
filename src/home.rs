@@ -1,4 +1,4 @@
-//! The client's directory on disk: its keys, its settings, and where the stores live.
+//! Client data directory layout: keys, configuration, databases, and working paths.
 
 use std::fs;
 use std::io::Write;
@@ -8,26 +8,25 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-/// Another client to start discovery from, and the relay it can be reached through.
+/// Bootstrap peer public key and relay URL.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Bootstrap {
-    /// The other client's public key, in hex.
+    /// Peer public key in hex.
     pub node: String,
     pub relay: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Config {
-    /// Relays this client connects through. With none, it only reaches clients on the local
-    /// network.
+    /// Relay URLs to connect through. If empty, peers connect on the local network only.
     #[serde(default)]
     pub relays: Vec<String>,
     #[serde(default)]
     pub bootstrap: Vec<Bootstrap>,
-    /// Written into claims as the agent that made them, unless a command names another.
+    /// Default agent name recorded in claims unless overridden by `--agent`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
-    /// Find other clients on the local network.
+    /// Enable mDNS local-network peer discovery.
     #[serde(default = "yes")]
     pub mdns: bool,
 }
@@ -36,12 +35,12 @@ fn yes() -> bool {
     true
 }
 
-/// The two secrets of a client. Both stay in `keys.json`, readable by the owner only.
+/// Private keys stored in `keys.json` (mode `0600`).
 #[derive(Serialize, Deserialize)]
 pub struct Keys {
-    /// Signs claims and identifies the client to other clients.
+    /// Keypair used to sign claims and identify this peer in p2panda.
     pub claims: p2panda::Credentials,
-    /// Identifies the separate connection that carries files, in hex.
+    /// Hex-encoded secret key for the separate iroh-blobs file-transfer endpoint.
     pub blobs: String,
 }
 
@@ -57,17 +56,17 @@ impl Keys {
     pub fn blobs_key(&self) -> Result<iroh::SecretKey> {
         let mut bytes = [0u8; 32];
         if self.blobs.len() != 64 {
-            bail!("keys.json: the file key is not 32 bytes of hex");
+            bail!("keys.json: blobs key must be 32 hex-encoded bytes");
         }
         for (i, byte) in bytes.iter_mut().enumerate() {
-            *byte =
-                u8::from_str_radix(&self.blobs[2 * i..2 * i + 2], 16).context("keys.json: the file key is not hex")?;
+            *byte = u8::from_str_radix(&self.blobs[2 * i..2 * i + 2], 16)
+                .context("keys.json: blobs key is not valid hex")?;
         }
         Ok(iroh::SecretKey::from_bytes(&bytes))
     }
 }
 
-/// Below the smallest `sun_path` among the systems this runs on (104 bytes on macOS).
+/// Safe limit below the shortest Unix `sun_path` buffer on supported platforms (104 bytes on macOS).
 const SOCKET_PATH_LIMIT: usize = 100;
 
 #[derive(Clone, Debug)]
@@ -76,7 +75,7 @@ pub struct Home {
 }
 
 impl Home {
-    /// `--home`, then `$DELPHI_P2P_HOME`, then `~/.delphi/p2p`.
+    /// Resolves the data directory from `--home`, `$DELPHI_P2P_HOME`, or `~/.delphi/p2p`.
     pub fn locate(flag: Option<PathBuf>) -> Result<Self> {
         let dir = match flag.or_else(|| std::env::var_os("DELPHI_P2P_HOME").map(PathBuf::from)) {
             Some(dir) => dir,
@@ -91,10 +90,10 @@ impl Home {
         self.dir.join("keys.json").exists()
     }
 
-    /// Creates the directory and its keys. An existing home keeps its keys.
+    /// Initializes the data directory and config. Preserves existing keys if already present.
     pub fn init(&self, config: &Config) -> Result<()> {
         fs::create_dir_all(&self.dir)?;
-        // The directory holds the keys and the control socket: the owner's only.
+        // Restrict directory permissions to the current user because it stores private keys and the control socket.
         fs::set_permissions(&self.dir, fs::Permissions::from_mode(0o700))?;
         if !self.exists() {
             let mut file = fs::OpenOptions::new()
@@ -109,8 +108,12 @@ impl Home {
 
     pub fn keys(&self) -> Result<Keys> {
         let path = self.dir.join("keys.json");
-        let text = fs::read_to_string(&path)
-            .with_context(|| format!("no client at {}: run `delphi-p2p init` first", self.dir.display()))?;
+        let text = fs::read_to_string(&path).with_context(|| {
+            format!(
+                "client not initialized at {}: run delphi-p2p init first",
+                self.dir.display()
+            )
+        })?;
         Ok(serde_json::from_str(&text)?)
     }
 
@@ -131,9 +134,8 @@ impl Home {
         Ok(())
     }
 
-    /// Takes the directory for this process: its stores can be open in one process only. The
-    /// lock goes when the returned file is dropped or the process ends. `None` when another
-    /// process holds it.
+    /// Acquires an exclusive file lock on the data directory. Returns `Ok(None)` if another process
+    /// holds it; the lock is released when the returned file handle is dropped.
     pub fn lock(&self) -> Result<Option<fs::File>> {
         let file = fs::OpenOptions::new()
             .create(true)
@@ -158,14 +160,13 @@ impl Home {
         self.dir.join("blobs")
     }
 
-    /// Where `check` puts the files of a snapshot before judging them.
+    /// Working directory where `check` unpacks a snapshot before running Lake.
     pub fn work(&self, snapshot: &str) -> PathBuf {
         self.dir.join("work").join(snapshot)
     }
 
-    /// The control socket of a running client. A Unix socket's path is limited to about a hundred
-    /// bytes, so a client in a deep directory keeps its socket in the user's runtime directory,
-    /// under a name derived from its own path.
+    /// Path to the control socket. Falls back to a hashed name in the runtime/temp directory
+    /// if the path inside `self.dir` would exceed the Unix socket length limit.
     pub fn socket(&self) -> PathBuf {
         let inside = self.dir.join("control.sock");
         if inside.as_os_str().len() <= SOCKET_PATH_LIMIT {
@@ -179,17 +180,17 @@ impl Home {
         runtime.join(format!("delphi-p2p-{}.sock", &name[..16]))
     }
 
-    /// The file address this client last announced, so that it announces again only on a change.
+    /// Cache file storing the last published `endpoint` claim to avoid redundant announcements.
     pub fn announced(&self) -> PathBuf {
         self.dir.join("announced.json")
     }
 }
 
-/// What a directory fetched with `get`, or published from, remembers about where it came from.
-/// A later `publish` in it follows that version without being told.
+/// Metadata written to `.delphi/origin.json` when fetching or publishing a directory so subsequent
+/// `publish` calls automatically link to the previous version.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Origin {
-    /// The publish claim these files are a copy of.
+    /// ID of the `publish` claim corresponding to this directory.
     pub version: String,
     pub snapshot: String,
 }

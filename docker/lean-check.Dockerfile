@@ -5,7 +5,9 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl git bubblewrap \
  && rm -rf /var/lib/apt/lists/*
 # Lake mounts an empty filesystem over /run/user inside its sandbox, so the mount point must exist.
-RUN useradd --create-home --uid 1000 checker && mkdir -p /work /run/user && chown checker /work
+# /work/.lake/packages exists and belongs to the checker, so that a volume mounted there does too
+# and Lake can still write the rest of .lake.
+RUN useradd --create-home --uid 1000 checker && mkdir -p /work/.lake/packages /run/user && chown -R checker /work
 USER checker
 RUN curl -sSf https://elan.lean-lang.org/elan-init.sh | sh -s -- -y --default-toolchain none
 ENV PATH=/home/checker/.elan/bin:$PATH

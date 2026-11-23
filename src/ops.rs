@@ -89,6 +89,11 @@ pub enum Command {
         /// Allow network access during the build to fetch external dependencies.
         #[arg(long)]
         network: bool,
+        /// Compile Mathlib from source. By default a project that pins Mathlib gets Mathlib's
+        /// prebuilt files, when `--network` is given and the runner is Docker.
+        #[arg(long)]
+        #[serde(default)]
+        no_mathlib_cache: bool,
         #[arg(long, default_value_t = 30)]
         wait: u64,
         #[arg(long)]
@@ -168,9 +173,13 @@ pub async fn run(node: &Node, command: Command) -> Result<String> {
             exact,
             runner,
             network,
+            no_mathlib_cache,
             wait,
             agent,
-        } => check(node, &id, exact, runner, network, Duration::from_secs(wait), agent).await,
+        } => {
+            let wait = Duration::from_secs(wait);
+            check(node, &id, exact, runner, network, !no_mathlib_cache, wait, agent).await
+        }
         Command::Files { id, exact, wait, json } => files(node, &id, exact, Duration::from_secs(wait), json).await,
         Command::Log { id: Some(id), json, .. } => record_log(node, &id, json).await,
         Command::Log {
@@ -390,12 +399,14 @@ async fn files(node: &Node, id: &str, exact: bool, wait: Duration, json: bool) -
     Ok(text)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn check(
     node: &Node,
     id: &str,
     exact: bool,
     runner: Runner,
     network: bool,
+    mathlib_cache: bool,
     wait: Duration,
     agent: Option<String>,
 ) -> Result<String> {
@@ -409,7 +420,7 @@ async fn check(
         std::fs::remove_dir_all(&dir)?;
     }
     files::export(&node.store, hash, &dir).await?;
-    let outcome = check::run(&dir, publish.comparator.as_deref(), runner, network).await?;
+    let outcome = check::run(&dir, publish.comparator.as_deref(), runner, network, mathlib_cache).await?;
 
     let body = claim::Check {
         snapshot: publish.snapshot.clone(),

@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 128" width="240" height="128" fill="none" stroke="#141821" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="delphi-p2p — decentralized peer mesh of researchers and AI agents verifying content-addressed proofs">
+  <defs>
+    <g id="bot">
+      <rect x="-6" y="-5" width="12" height="11" rx="2"/>
+      <path d="M0-5v-3.2"/>
+      <circle cx="0" cy="-9.3" r="1.2" fill="#141821" stroke="none"/>
+      <circle cx="-2.3" cy="0.5" r="1.1" fill="#141821" stroke="none"/>
+      <circle cx="2.3" cy="0.5" r="1.1" fill="#141821" stroke="none"/>
+    </g>
+    <g id="hum">
+      <circle cx="0" cy="0" r="6.5"/>
+      <circle cx="-2.3" cy="0" r="1.1" fill="#141821" stroke="none"/>
+      <circle cx="2.3" cy="0" r="1.1" fill="#141821" stroke="none"/>
+    </g>
+  </defs>
+
+  <!-- Peer mesh connections -->
+  <line x1="65" y1="34" x2="175" y2="34" stroke="#70788b" stroke-width="1.4"/>
+  <line x1="65" y1="94" x2="175" y2="94" stroke="#70788b" stroke-width="1.4"/>
+  <line x1="48" y1="51" x2="48" y2="77" stroke="#70788b" stroke-width="1.4"/>
+  <line x1="192" y1="51" x2="192" y2="77" stroke="#70788b" stroke-width="1.4"/>
+  <line x1="62" y1="43" x2="178" y2="85" stroke="#70788b" stroke-width="1.3" stroke-dasharray="3.5 3"/>
+  <line x1="62" y1="85" x2="178" y2="43" stroke="#70788b" stroke-width="1.3" stroke-dasharray="3.5 3"/>
+
+  <!-- Subtle transfer nodes on outer mesh edges -->
+  <circle cx="120" cy="34" r="2.6" fill="#1d54a6" stroke="none"/>
+  <circle cx="120" cy="94" r="2.6" fill="#1d54a6" stroke="none"/>
+  <circle cx="48" cy="64" r="2.4" fill="#70788b" stroke="none"/>
+  <circle cx="192" cy="64" r="2.4" fill="#70788b" stroke="none"/>
+
+  <!-- Peer nodes (human and agent peers) -->
+  <circle cx="48" cy="34" r="17" fill="#f2f4f8" stroke="#dde2ec" stroke-width="1.5"/>
+  <use href="#hum" x="48" y="34"/>
+
+  <circle cx="192" cy="34" r="17" fill="#f2f4f8" stroke="#dde2ec" stroke-width="1.5"/>
+  <use href="#bot" x="192" y="36"/>
+
+  <circle cx="48" cy="94" r="17" fill="#f2f4f8" stroke="#dde2ec" stroke-width="1.5"/>
+  <use href="#bot" x="48" y="96"/>
+
+  <circle cx="192" cy="94" r="17" fill="#f2f4f8" stroke="#dde2ec" stroke-width="1.5"/>
+  <use href="#hum" x="192" y="94"/>
+
+  <!-- Center content-addressed proof snapshot -->
+  <rect x="97" y="42" width="46" height="44" rx="9" fill="#fbfbfd" stroke="#1d54a6" stroke-width="1.9"/>
+  <rect x="106.5" y="52" width="20" height="26" rx="2" fill="#f2f4f8" stroke="#141821" stroke-width="1.5"/>
+  <path d="M111 59h11M111 64.5h11M111 70h7" stroke="#52596b" stroke-width="1.3"/>
+
+  <!-- Verified check badge on snapshot -->
+  <circle cx="139" cy="46" r="10.5" fill="#eaf1fb" stroke="#1d54a6" stroke-width="1.7"/>
+  <path d="M134.8 46.2l2.9 2.9 5.5-5.8" stroke="#1d54a6" stroke-width="2.0"/>
+</svg>

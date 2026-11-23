@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 218" width="860" height="218" role="img" aria-label="Versions, forks, and checks: Key A publishes v1 (earlier, 2 pass) then updates to v2 (current, 0 checks because it has a new BLAKE3 hash). Key B edits v1 to publish v1b (fork, 1 pass), which never replaces v2.">
+  <defs>
+    <marker id="ver-arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto-start-reverse">
+      <path d="M1 1.5L8.5 5L1 8.5" fill="none" stroke="#52596b" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <!-- Outer frame -->
+  <rect x="6" y="6" width="848" height="206" rx="12" fill="#fbfbfd" stroke="#dde2ec" stroke-width="1.2"/>
+  <text x="26" y="30" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="10" font-weight="600" letter-spacing="0.06em" fill="#70788b">VERSIONS, FORKS &amp; SNAPSHOT-BOUND CHECKS</text>
+
+  <!-- Row labels -->
+  <text x="26" y="75" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#141821">Author</text>
+  <text x="26" y="92" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10" fill="#52596b">Key A</text>
+  <text x="26" y="161" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#141821">Other peer</text>
+  <text x="26" y="178" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10" fill="#52596b">Key B</text>
+
+  <!-- v1 card -->
+  <rect x="136" y="46" width="244" height="66" rx="8" fill="#f2f4f8" stroke="#dde2ec" stroke-width="1.3"/>
+  <text x="152" y="70" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="700" fill="#141821">v1</text>
+  <rect x="176" y="56" width="50" height="18" rx="9" fill="#fbfbfd" stroke="#dde2ec" stroke-width="1"/>
+  <text x="201.0" y="68.4" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="9.5" font-weight="500" fill="#52596b">earlier</text>
+  <text x="366" y="70" text-anchor="end" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.2" fill="#70788b">8f3a…</text>
+  <text x="152" y="96" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#1d54a6">✓ 2 pass<tspan dx="4" font-weight="400" font-size="10.4" fill="#52596b">· 2 distinct keys</tspan></text>
+
+  <!-- Arrow v1 -> v2 -->
+  <line x1="380" y1="79" x2="506" y2="79" stroke="#52596b" stroke-width="1.4" marker-end="url(#ver-arr)"/>
+  <text x="443" y="69" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="10" fill="#52596b">same key</text>
+
+  <!-- v2 card -->
+  <rect x="512" y="46" width="320" height="66" rx="8" fill="#fbfbfd" stroke="#1d54a6" stroke-width="1.6"/>
+  <text x="528" y="70" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="700" fill="#141821">v2</text>
+  <rect x="552" y="56" width="54" height="18" rx="9" fill="#eaf1fb" stroke="#b8cff0" stroke-width="1"/>
+  <text x="579.0" y="68.4" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="9.5" font-weight="600" fill="#1d54a6">current</text>
+  <text x="818" y="70" text-anchor="end" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.2" fill="#70788b">c41b…</text>
+  <text x="528" y="96" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#141821">0 checks<tspan dx="4" font-weight="400" font-size="10.4" fill="#52596b">· new snapshot hash starts fresh</tspan></text>
+
+  <!-- Branch v1 -> v1b -->
+  <path d="M 258 112 V 157 Q 258 165 266 165 H 506" fill="none" stroke="#52596b" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#ver-arr)"/>
+  <text x="386" y="155" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="10" fill="#52596b">different key</text>
+
+  <!-- v1b fork card -->
+  <rect x="512" y="132" width="320" height="66" rx="8" fill="#f2f4f8" stroke="#70788b" stroke-width="1.3" stroke-dasharray="4 3"/>
+  <text x="528" y="156" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="700" fill="#141821">v1b</text>
+  <rect x="560" y="142" width="42" height="18" rx="9" fill="#fbfbfd" stroke="#dde2ec" stroke-width="1"/>
+  <text x="581.0" y="154.4" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="9.5" font-weight="500" fill="#52596b">fork</text>
+  <text x="818" y="156" text-anchor="end" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.2" fill="#70788b">9e02…</text>
+  <text x="528" y="182" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#1d54a6">✓ 1 pass<tspan dx="4" font-weight="400" font-size="10.4" fill="#52596b">· never replaces v2</tspan></text>
+</svg>

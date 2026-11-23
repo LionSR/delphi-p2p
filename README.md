@@ -143,6 +143,7 @@ delphi-p2p check <id> --exact        # check a specific version or fork
 | `Result: fail` | Signed and published only when Lake explicitly reports a kernel rejection, disallowed axiom, or challenge mismatch. |
 | `did not reach a verdict` | Checker could not run or the project failed to compile. Nothing is signed. |
 | External dependencies (e.g. Mathlib) | If `lake-manifest.json` declares external packages, `check` stops and asks you to re-run with `--network`. Pass `--network` only when you accept giving project build code network access. |
+| Mathlib | With `--network` and the Docker runner, a project that pins Mathlib from `leanprover-community/mathlib4` gets Mathlib's prebuilt files instead of compiling Mathlib. Lake then compiles only the project and still replays everything it uses through the kernel. The signed claim's checker reads `lake check (Mathlib from its cache)`. `--no-mathlib-cache` compiles Mathlib from source. |
 
 #### Sandbox requirements (Linux and macOS)
 
@@ -267,7 +268,7 @@ A network across the internet needs an `iroh-relay` server (so peers behind NAT 
 | `delphi-p2p log [<id>]` | List received claims (`--since`, `--kind`, `--limit`, `--json`), or show all versions of one record |
 | `delphi-p2p files <id>` | List files and diffs for a version without downloading contents (`--exact`, `--json`) |
 | `delphi-p2p get <id> --files <dir>` | Download files for a record's latest version (`--exact` for a specific version) |
-| `delphi-p2p check <id>` | Run the Lean checker in a sandbox and sign the verdict (`--exact`, `--network`, `--runner`) |
+| `delphi-p2p check <id>` | Run the Lean checker in a sandbox and sign the verdict (`--exact`, `--network`, `--no-mathlib-cache`, `--runner`) |
 | `delphi-p2p publish <dir> --title <t>` | Publish a new record, or omit `--title` to publish a new version or fork |
 | `delphi-p2p serve [--mirror]` | Run as a background server (`--mirror` downloads and serves all versions) |
 
@@ -313,7 +314,8 @@ The default data directory is `~/.delphi/p2p` (override with `$DELPHI_P2P_HOME` 
 | **Deduplication** | iroh-blobs deduplicates whole files rather than chunks, so editing a file transfers that file again. |
 | **Lean version** | Requires Lean 4.35 or later (`lake check` is absent in older toolchains such as Lean 4.34.1). |
 | **Single relay** | Peers announce their configured relay URL; migrating an existing network to another relay is not yet supported. |
-| **External dependencies** | Projects with external packages require `--network` during `check`; Mathlib-scale builds have not yet been benchmarked. |
+| **External dependencies** | Projects with external packages require `--network` during `check`. Mathlib's prebuilt files are fetched with the Docker runner only; with bubblewrap on a Linux host, Mathlib is compiled from source. |
+| **Large checks are slow after compiling** | A project that uses much of Mathlib still has all of that exported and replayed through the kernel. One such check (337 modules, 8 CPUs) took 2 h 50 min: 2 min for Mathlib's files, 39 min compiling, 37 min exporting 6 GB, about 90 min replaying. |
 | **Claim size** | Claims are capped at 3,000 bytes to fit within p2panda's default gossip message size. |
 | **Identity binding** | Signing keys are not yet linked to verified identities, so multiple keys controlled by the same person count separately. |
 | **Pre-1.0 protocol crates** | Both `p2panda` and `iroh-blobs` are pre-1.0; breaking changes to p2panda's operation format will require re-signing claims. |

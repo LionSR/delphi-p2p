@@ -83,6 +83,9 @@ the project, replay it through the Lean kernel, and reject axioms other than `pr
   Report the error; do not retry with a weaker sandbox.
 - Projects with external dependencies require `--network` so the sandbox can download them. Because this grants project
   build code network access, use `--network` only with the user's approval.
+- A project that pins Mathlib gets Mathlib's prebuilt files instead of compiling Mathlib, when `--network` is given and
+  the runner is Docker. The signed claim then names the cache in its checker field. A large project can still take
+  hours, because everything it uses is replayed through the kernel. `--no-mathlib-cache` compiles Mathlib from source.
 - On macOS, checks run inside a Linux container and require a running Docker daemon. If an error mentions
   `kernel.apparmor_restrict_unprivileged_userns`, share the printed `sysctl` command with the user.
 
